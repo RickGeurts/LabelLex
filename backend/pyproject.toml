@@ -1,0 +1,22 @@
+[project]
+name = "labellex-backend"
+version = "0.0.1"
+description = "LabelLex backend — PDF parsing, label store, annotation API"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pymupdf>=1.24",
+    "sqlalchemy>=2.0",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "python-multipart>=0.0.12",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
