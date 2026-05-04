@@ -62,11 +62,43 @@ export interface Project {
 export interface Document {
   id: number;
   project_id: number;
+  category_id: number | null;
   filename: string;
   page_count: number;
   status: string;
   uploaded_by: number;
   uploaded_at: string;
+  last_modified_at: string;
+  annotation_count: number;
+}
+
+export interface DocumentUpdate {
+  category_id?: number | null;
+}
+
+export interface DocumentCategory {
+  id: number;
+  project_id: number;
+  name: string;
+  description: string | null;
+  color: string;
+  created_at: string;
+}
+
+export interface DocumentCategoryCreate {
+  name: string;
+  description?: string | null;
+  color?: string;
+}
+
+export interface DocumentCategoryUpdate {
+  name?: string;
+  description?: string | null;
+  color?: string;
+}
+
+export interface ProjectCreate {
+  name: string;
 }
 
 export interface Word {
@@ -181,4 +213,51 @@ export interface SuggestAttributesOut {
   model: string;
   confidence: number;
   attributes: SuggestedAttribute[];
+}
+
+export interface PrelabelRequest {
+  start_page_num: number;
+  end_page_num: number;
+  label_definition_ids?: number[] | null;
+}
+
+export interface PrelabelCandidate {
+  suggestion_id: number;
+  label_definition_id: number;
+  start_page_num: number;
+  start_char: number;
+  end_page_num: number;
+  end_char: number;
+  text: string;
+  confidence: number;
+}
+
+export type PrelabelEvent =
+  | { type: "started"; model: string; total_pages: number }
+  | {
+      type: "page_done";
+      page_num: number;
+      pages_done: number;
+      pages_total: number;
+      candidates: PrelabelCandidate[];
+    }
+  | { type: "done" }
+  | { type: "error"; message: string };
+
+export interface SuggestionListItem {
+  id: number;
+  document_id: number;
+  label_definition_id: number;
+  text: string;
+  start_page_num: number | null;
+  start_char: number | null;
+  end_page_num: number | null;
+  end_char: number | null;
+  strategy: string;
+  model: string;
+  confidence: number;
+  suggested_attributes: SuggestedAttribute[];
+  status: string;
+  annotation_id: number | null;
+  created_at: string;
 }

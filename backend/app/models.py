@@ -109,17 +109,52 @@ class AttributeDefinition(Base):
     label: Mapped[LabelDefinition] = relationship(back_populates="attributes")
 
 
+class DocumentCategory(Base):
+    """Admin-defined per-project bucket (e.g. 'Senior Preferred Prospectus').
+
+    Documents may be tagged with one category; the assignment is optional.
+    Deleting a category nulls the FK on documents (handled in the router
+    explicitly so behaviour matches whether or not SQLite has FK
+    enforcement enabled).
+    """
+
+    __tablename__ = "document_categories"
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_doccat_project_name"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    color: Mapped[str] = mapped_column(String(16), default="#6366f1")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+
+
 class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"))
+    category_id: Mapped[int | None] = mapped_column(
+        ForeignKey("document_categories.id", ondelete="SET NULL"), nullable=True
+    )
     filename: Mapped[str] = mapped_column(String(512))
     page_count: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), default="ready")  # uploading|parsing|ready|failed
     file_path: Mapped[str] = mapped_column(String(1024))
     uploaded_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Bumped whenever an annotation on this document is created/updated/deleted
+    # or when a clause-discovery suggestion is accepted. Drives the
+    # "last activity" column in the project's document table.
+    last_modified_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
 
     project: Mapped[Project] = relationship(back_populates="documents")
     pages: Mapped[list["Page"]] = relationship(

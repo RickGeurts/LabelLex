@@ -1,77 +1,366 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useParams } from "react-router-dom";
 
 import { api } from "../api";
-import type { Document } from "../types";
+import type { Document, DocumentCategory } from "../types";
 
-interface Props {
-  projectId: number;
+type UploadStatus = "queued" | "uploading" | "done" | "failed";
+
+interface UploadItem {
+  key: string;
+  file: File;
+  status: UploadStatus;
+  error?: string;
 }
 
-export default function ProjectPage({ projectId }: Props) {
-  const [docs, setDocs] = useState<Document[]>([]);
-  const [busy, setBusy] = useState(false);
+function formatDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  if (sameDay) {
+    return `today ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  }
+  return d.toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+export default function ProjectPage() {
+  const { projectId: projectIdParam } = useParams();
+  const projectId = Number(projectIdParam);
+
+  const [docs, setDocs] = useState<Document[] | null>(null);
+  const [categories, setCategories] = useState<DocumentCategory[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [dragActive, setDragActive] = useState(false);
+  const dragCounter = useRef(0);
   const fileInput = useRef<HTMLInputElement | null>(null);
 
   const refresh = useCallback(() => {
-    api.listDocuments(projectId).then(setDocs).catch((e) => setError(String(e)));
+    if (!Number.isFinite(projectId)) return;
+    api
+      .listDocuments(projectId)
+      .then(setDocs)
+      .catch((e) => setError(String(e)));
+    api
+      .listCategories(projectId)
+      .then(setCategories)
+      .catch((e) => setError(String(e)));
   }, [projectId]);
 
   useEffect(refresh, [refresh]);
 
-  const onUpload = async (file: File) => {
-    setBusy(true);
-    setError(null);
+  const categoriesById = useMemo(
+    () => new Map(categories.map((c) => [c.id, c] as const)),
+    [categories],
+  );
+
+  const onAssignCategory = async (docId: number, value: string) => {
+    const category_id = value === "" ? null : Number(value);
     try {
-      await api.uploadDocument(projectId, file);
-      refresh();
+      const updated = await api.updateDocument(docId, { category_id });
+      setDocs((prev) =>
+        prev ? prev.map((d) => (d.id === docId ? updated : d)) : prev,
+      );
     } catch (e) {
       setError(String(e));
-    } finally {
-      setBusy(false);
-      if (fileInput.current) fileInput.current.value = "";
     }
   };
 
+  // Sequential upload: pymupdf parsing is CPU-bound, parallel uploads only
+  // hurt. Each file flips through queued → uploading → done|failed; the
+  // table refreshes after the run so the user sees the new rows.
+  const processQueue = useCallback(
+    async (items: UploadItem[]) => {
+      for (const item of items) {
+        setUploads((prev) =>
+          prev.map((u) =>
+            u.key === item.key ? { ...u, status: "uploading" } : u,
+          ),
+        );
+        try {
+          await api.uploadDocument(projectId, item.file);
+          setUploads((prev) =>
+            prev.map((u) =>
+              u.key === item.key ? { ...u, status: "done" } : u,
+            ),
+          );
+        } catch (e) {
+          setUploads((prev) =>
+            prev.map((u) =>
+              u.key === item.key
+                ? { ...u, status: "failed", error: String(e) }
+                : u,
+            ),
+          );
+        }
+        // Refresh after each so the user sees rows appearing live.
+        refresh();
+      }
+    },
+    [projectId, refresh],
+  );
+
+  const enqueueFiles = useCallback(
+    (files: FileList | File[]) => {
+      const arr = Array.from(files);
+      const pdfs = arr.filter((f) =>
+        (f.name || "").toLowerCase().endsWith(".pdf"),
+      );
+      const skipped = arr.length - pdfs.length;
+      if (pdfs.length === 0) {
+        setError(
+          skipped > 0
+            ? `Only PDFs are supported (${skipped} file${skipped === 1 ? "" : "s"} skipped).`
+            : "No files selected.",
+        );
+        return;
+      }
+      setError(
+        skipped > 0
+          ? `${skipped} non-PDF file${skipped === 1 ? "" : "s"} skipped.`
+          : null,
+      );
+      const items: UploadItem[] = pdfs.map((f) => ({
+        key: `${f.name}-${f.size}-${f.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
+        file: f,
+        status: "queued",
+      }));
+      setUploads((prev) => [...prev, ...items]);
+      void processQueue(items);
+    },
+    [processQueue],
+  );
+
+  // Drag handlers — counter-based so children's dragenter/leave don't flicker.
+  const onDragEnter = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current += 1;
+    if (dragCounter.current === 1) setDragActive(true);
+  };
+  const onDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current = Math.max(0, dragCounter.current - 1);
+    if (dragCounter.current === 0) setDragActive(false);
+  };
+  const onDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  };
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    dragCounter.current = 0;
+    setDragActive(false);
+    if (e.dataTransfer.files?.length) enqueueFiles(e.dataTransfer.files);
+  };
+
+  const clearFinishedUploads = () => {
+    setUploads((prev) =>
+      prev.filter((u) => u.status !== "done" && u.status !== "failed"),
+    );
+  };
+
+  const queuedOrActive = uploads.filter(
+    (u) => u.status === "queued" || u.status === "uploading",
+  );
+  const finished = uploads.filter(
+    (u) => u.status === "done" || u.status === "failed",
+  );
+
   return (
     <>
-      <div className="card">
-        <h2 style={{ marginTop: 0 }}>Upload prospectus</h2>
+      <div
+        className={`drop-zone${dragActive ? " active" : ""}`}
+        onDragEnter={onDragEnter}
+        onDragLeave={onDragLeave}
+        onDragOver={onDragOver}
+        onDrop={onDrop}
+        onClick={() => fileInput.current?.click()}
+      >
         <input
           ref={fileInput}
           type="file"
           accept="application/pdf"
-          disabled={busy}
+          multiple
+          style={{ display: "none" }}
           onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) onUpload(f);
+            if (e.target.files?.length) enqueueFiles(e.target.files);
+            e.target.value = "";
           }}
         />
-        {busy && <div style={{ marginTop: 8, color: "#64748b" }}>Parsing… can take a few seconds for long docs.</div>}
-        {error && <div className="error-banner" style={{ marginTop: 10 }}>{error}</div>}
+        <div className="drop-zone-title">
+          {dragActive ? "Drop PDFs to upload" : "Drag & drop PDFs here"}
+        </div>
+        <div className="drop-zone-sub">
+          or click to browse · multiple files OK · uploads run sequentially
+        </div>
       </div>
 
-      <div className="card">
-        <h2 style={{ marginTop: 0 }}>Documents</h2>
-        {docs.length === 0 ? (
-          <div className="empty-state">No documents yet. Upload one above.</div>
-        ) : (
-          <ul className="doc-list">
-            {docs.map((d) => (
-              <li key={d.id}>
-                <div>
-                  <Link to={`/documents/${d.id}`}>{d.filename}</Link>
-                  <div className="doc-meta">
-                    {d.page_count} pages · uploaded {new Date(d.uploaded_at).toLocaleString()} · status {d.status}
-                  </div>
-                </div>
-                <Link to={`/documents/${d.id}`}>
-                  <button className="btn ghost">Open</button>
-                </Link>
+      {error && <div className="error-banner">{error}</div>}
+
+      {uploads.length > 0 && (
+        <div className="card upload-queue-card">
+          <div className="upload-queue-header">
+            <h2 style={{ margin: 0 }}>Uploads</h2>
+            <span style={{ flex: 1 }} />
+            {finished.length > 0 && queuedOrActive.length === 0 && (
+              <button
+                className="btn ghost btn-xs"
+                onClick={clearFinishedUploads}
+              >
+                clear
+              </button>
+            )}
+          </div>
+          <ul className="upload-queue">
+            {uploads.map((u) => (
+              <li key={u.key} className={`upload-item upload-${u.status}`}>
+                <span className="upload-name">{u.file.name}</span>
+                <span className="upload-size">
+                  {(u.file.size / 1024 / 1024).toFixed(1)} MB
+                </span>
+                <span className={`upload-status status-${u.status}`}>
+                  {u.status === "queued" && "queued"}
+                  {u.status === "uploading" && "uploading…"}
+                  {u.status === "done" && "✓ done"}
+                  {u.status === "failed" && "✗ failed"}
+                </span>
+                {u.status === "failed" && u.error && (
+                  <span className="upload-error" title={u.error}>
+                    {u.error.length > 60 ? u.error.slice(0, 57) + "…" : u.error}
+                  </span>
+                )}
               </li>
             ))}
           </ul>
+        </div>
+      )}
+
+      <div className="card">
+        <div className="upload-queue-header" style={{ marginBottom: 6 }}>
+          <h2 style={{ margin: 0 }}>Documents</h2>
+          <span style={{ flex: 1 }} />
+          <span style={{ color: "#94a3b8", fontSize: 12 }}>
+            {docs?.length ?? 0} document
+            {(docs?.length ?? 0) === 1 ? "" : "s"}
+          </span>
+        </div>
+        {docs === null ? (
+          <div className="empty-state">Loading…</div>
+        ) : docs.length === 0 ? (
+          <div className="empty-state">
+            No documents yet. Drop a PDF above to get started.
+            {categories.length === 0 && (
+              <div style={{ fontSize: 12, marginTop: 6, color: "#94a3b8" }}>
+                Tip: define categories in{" "}
+                <Link to={`/projects/${projectId}/settings`}>Settings</Link>{" "}
+                to bucket your prospectuses.
+              </div>
+            )}
+          </div>
+        ) : (
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>Document</th>
+                <th>Category</th>
+                <th>Status</th>
+                <th className="num">Annotations</th>
+                <th>Last modified</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {docs.map((d) => {
+                const labelled = d.annotation_count > 0;
+                const parseFailed = d.status === "failed";
+                const parsing = d.status === "parsing";
+                const category =
+                  d.category_id !== null
+                    ? categoriesById.get(d.category_id)
+                    : undefined;
+                return (
+                  <tr key={d.id}>
+                    <td>
+                      <Link
+                        to={`/projects/${projectId}/documents/${d.id}`}
+                        className="doc-table-name"
+                      >
+                        {d.filename}
+                      </Link>
+                      <div className="doc-table-sub">
+                        {d.page_count} page{d.page_count === 1 ? "" : "s"}
+                      </div>
+                    </td>
+                    <td>
+                      <div className="category-cell">
+                        <span
+                          className="label-swatch"
+                          style={{
+                            background: category?.color ?? "#cbd5e1",
+                            opacity: category ? 1 : 0.4,
+                          }}
+                        />
+                        <select
+                          className="category-select"
+                          value={d.category_id ?? ""}
+                          onChange={(e) =>
+                            onAssignCategory(d.id, e.target.value)
+                          }
+                        >
+                          <option value="">— uncategorised</option>
+                          {categories.map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.name}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </td>
+                    <td>
+                      {parseFailed ? (
+                        <span className="status-pill status-pill-failed">
+                          parse failed
+                        </span>
+                      ) : parsing ? (
+                        <span className="status-pill status-pill-parsing">
+                          parsing
+                        </span>
+                      ) : labelled ? (
+                        <span className="status-pill status-pill-labelled">
+                          labelled
+                        </span>
+                      ) : (
+                        <span className="status-pill status-pill-unlabelled">
+                          unlabelled
+                        </span>
+                      )}
+                    </td>
+                    <td className="num">
+                      {d.annotation_count > 0 ? d.annotation_count : "—"}
+                    </td>
+                    <td className="muted">{formatDate(d.last_modified_at)}</td>
+                    <td className="actions">
+                      <Link
+                        to={`/projects/${projectId}/documents/${d.id}`}
+                      >
+                        <button className="btn ghost btn-xs">Open</button>
+                      </Link>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         )}
       </div>
     </>

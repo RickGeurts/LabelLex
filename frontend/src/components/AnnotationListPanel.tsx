@@ -163,7 +163,7 @@ export default function AnnotationListPanel({
                       title="Delete annotation"
                       onClick={(e) => {
                         e.stopPropagation();
-                        if (confirm(`Delete this annotation?`)) onDelete(a.id);
+                        onDelete(a.id);
                       }}
                     >
                       delete

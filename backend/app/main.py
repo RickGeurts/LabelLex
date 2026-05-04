@@ -11,10 +11,11 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
-from .db import Base, SessionLocal, engine
+from .db import Base, SessionLocal, engine, run_lightweight_migrations
 from .routers import (
     annotations,
     attributes,
+    categories,
     documents,
     labels,
     projects,
@@ -28,6 +29,7 @@ from .seed import seed
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    run_lightweight_migrations()
     with SessionLocal() as db:
         seed(db)
     yield
@@ -46,6 +48,7 @@ app.add_middleware(
 app.include_router(projects.router)
 app.include_router(labels.router)
 app.include_router(attributes.router)
+app.include_router(categories.router)
 app.include_router(documents.router)
 app.include_router(annotations.router)
 app.include_router(search.router)

@@ -20,6 +20,7 @@ import type {
   Document as DocModel,
   Label,
   Page as PageModel,
+  PrelabelCandidate,
   SearchHit,
 } from "../types";
 import PdfPage from "../components/PdfPage";
@@ -78,9 +79,10 @@ type PopoverState =
       y: number;
     };
 
-export default function DocumentViewer({ projectId }: { projectId: number }) {
-  const { id } = useParams();
-  const documentId = Number(id);
+export default function DocumentViewer() {
+  const params = useParams();
+  const projectId = Number(params.projectId);
+  const documentId = Number(params.documentId);
 
   const [doc, setDoc] = useState<DocModel | null>(null);
   const [pages, setPages] = useState<PageModel[]>([]);
@@ -152,6 +154,20 @@ export default function DocumentViewer({ projectId }: { projectId: number }) {
     | { kind: "error"; message: string }
     | { kind: "result"; model: string; sections: DetectedSection[] };
   const [detectModal, setDetectModal] = useState<DetectModalState | null>(null);
+
+  // Ollama-driven clause discovery (pre-labelling).
+  interface PrelabelState {
+    startPage: number;
+    endPage: number;
+    selectedLabels: Set<number>;
+    candidates: PrelabelCandidate[];
+    running: boolean;
+    error: string | null;
+    lastModel: string | null;
+    lastPagesScanned: number;
+    progress: { done: number; total: number } | null;
+  }
+  const [prelabelModal, setPrelabelModal] = useState<PrelabelState | null>(null);
 
   const [showPanel, setShowPanel] = useState<boolean>(() => {
     try {
@@ -698,7 +714,6 @@ export default function DocumentViewer({ projectId }: { projectId: number }) {
 
   const deleteFromEditor = () => {
     if (!popover || popover.kind !== "editor") return;
-    if (!confirm("Delete this annotation?")) return;
     const annId = popover.annotationId;
     api
       .deleteAnnotation(annId)
@@ -838,6 +853,206 @@ export default function DocumentViewer({ projectId }: { projectId: number }) {
       });
   }, [documentId]);
 
+  // ---------- Pre-label (clause discovery) -------------------------------
+  const openPrelabelModal = useCallback(() => {
+    if (!doc) return;
+    const start = currentPage;
+    const end = Math.min(doc.page_count, currentPage + 9);
+    // Default scope: every leaf label in the project (most specific picks).
+    const childIds = new Set<number>();
+    for (const l of labels) {
+      if (l.parent_id !== null) childIds.add(l.parent_id);
+    }
+    const leafIds = labels
+      .filter((l) => !childIds.has(l.id))
+      .map((l) => l.id);
+    setPrelabelModal({
+      startPage: start,
+      endPage: end,
+      selectedLabels: new Set(leafIds),
+      candidates: [],
+      running: false,
+      error: null,
+      lastModel: null,
+      lastPagesScanned: 0,
+      progress: null,
+    });
+    api
+      .listDocumentSuggestions(documentId, "pending")
+      .then((existing) => {
+        setPrelabelModal((prev) => {
+          if (!prev) return prev;
+          const seeded: PrelabelCandidate[] = existing
+            .filter(
+              (s) =>
+                s.start_page_num !== null &&
+                s.start_char !== null &&
+                s.end_page_num !== null &&
+                s.end_char !== null,
+            )
+            .map((s) => ({
+              suggestion_id: s.id,
+              label_definition_id: s.label_definition_id,
+              start_page_num: s.start_page_num as number,
+              start_char: s.start_char as number,
+              end_page_num: s.end_page_num as number,
+              end_char: s.end_char as number,
+              text: s.text,
+              confidence: s.confidence,
+            }));
+          return { ...prev, candidates: seeded };
+        });
+      })
+      .catch((err) => {
+        setPrelabelModal((prev) =>
+          prev ? { ...prev, error: String(err) } : prev,
+        );
+      });
+  }, [doc, currentPage, labels, documentId]);
+
+  const runPrelabelScan = useCallback(() => {
+    // Side effects (the fetch) MUST live outside setState updaters — React
+    // StrictMode invokes updaters twice in dev to surface impurities, and
+    // a side effect inside one fires the request twice (concurrent SQLite
+    // writers → "database is locked").
+    if (!prelabelModal) return;
+    if (prelabelModal.running) return;
+    if (prelabelModal.selectedLabels.size === 0) {
+      setPrelabelModal((cur) =>
+        cur ? { ...cur, error: "Pick at least one label to scan for." } : cur,
+      );
+      return;
+    }
+    const startPage = prelabelModal.startPage;
+    const endPage = prelabelModal.endPage;
+    const labelIds = Array.from(prelabelModal.selectedLabels);
+
+    setPrelabelModal((cur) =>
+      cur
+        ? {
+            ...cur,
+            running: true,
+            error: null,
+            progress: { done: 0, total: 0 },
+          }
+        : cur,
+    );
+
+    void api
+      .prelabelDocumentStream(
+        documentId,
+        {
+          start_page_num: startPage,
+          end_page_num: endPage,
+          label_definition_ids: labelIds,
+        },
+        (event) => {
+          setPrelabelModal((cur) => {
+            if (!cur) return cur;
+            if (event.type === "started") {
+              return {
+                ...cur,
+                lastModel: event.model,
+                progress: { done: 0, total: event.total_pages },
+              };
+            }
+            if (event.type === "page_done") {
+              const seen = new Set(cur.candidates.map((c) => c.suggestion_id));
+              const merged = [
+                ...cur.candidates,
+                ...event.candidates.filter((c) => !seen.has(c.suggestion_id)),
+              ];
+              return {
+                ...cur,
+                candidates: merged,
+                progress: {
+                  done: event.pages_done,
+                  total: event.pages_total,
+                },
+                lastPagesScanned: event.pages_done,
+              };
+            }
+            if (event.type === "error") {
+              return { ...cur, running: false, error: event.message };
+            }
+            if (event.type === "done") {
+              return { ...cur, running: false };
+            }
+            return cur;
+          });
+        },
+      )
+      .catch((err) => {
+        setPrelabelModal((cur) =>
+          cur ? { ...cur, running: false, error: String(err) } : cur,
+        );
+      })
+      .finally(() => {
+        setPrelabelModal((cur) =>
+          cur && cur.running ? { ...cur, running: false } : cur,
+        );
+      });
+  }, [prelabelModal, documentId]);
+
+  const acceptCandidate = useCallback(
+    (suggestionId: number) => {
+      api
+        .acceptSuggestion(suggestionId)
+        .then((created) => {
+          setAnnotations((prev) => [...prev, created]);
+          setPrelabelModal((cur) =>
+            cur
+              ? {
+                  ...cur,
+                  candidates: cur.candidates.filter(
+                    (c) => c.suggestion_id !== suggestionId,
+                  ),
+                }
+              : cur,
+          );
+        })
+        .catch((err) => {
+          setPrelabelModal((cur) =>
+            cur ? { ...cur, error: String(err) } : cur,
+          );
+        });
+    },
+    [],
+  );
+
+  const rejectCandidate = useCallback((suggestionId: number) => {
+    api
+      .rejectSuggestion(suggestionId)
+      .then(() => {
+        setPrelabelModal((cur) =>
+          cur
+            ? {
+                ...cur,
+                candidates: cur.candidates.filter(
+                  (c) => c.suggestion_id !== suggestionId,
+                ),
+              }
+            : cur,
+        );
+      })
+      .catch((err) => {
+        setPrelabelModal((cur) =>
+          cur ? { ...cur, error: String(err) } : cur,
+        );
+      });
+  }, []);
+
+  const jumpToCandidate = useCallback((c: PrelabelCandidate) => {
+    setSearchHighlight({
+      pageNum: c.start_page_num,
+      charStart: c.start_char,
+      charEnd: c.end_char,
+    });
+    scrollToPage(c.start_page_num);
+    // scrollToPage is captured fresh each render via closure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   if (!doc) {
     return <div>Loading document…</div>;
   }
@@ -878,6 +1093,13 @@ export default function DocumentViewer({ projectId }: { projectId: number }) {
           title="Use Ollama to find the section structure of this document"
         >
           🪄 Detect structure
+        </button>
+        <button
+          className="btn ghost btn-xs"
+          onClick={openPrelabelModal}
+          title="Use Ollama to propose annotations across a page range"
+        >
+          🪄 Pre-label
         </button>
         <button
           className="btn ghost btn-xs"
@@ -1162,6 +1384,255 @@ export default function DocumentViewer({ projectId }: { projectId: number }) {
                 )}
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Pre-label modal */}
+      {prelabelModal && doc && (
+        <div className="modal-backdrop" onClick={() => setPrelabelModal(null)}>
+          <div
+            className="modal prelabel-modal"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-header">
+              <h2>Pre-label clauses</h2>
+              <span style={{ flex: 1 }} />
+              <button
+                className="btn ghost btn-xs"
+                onClick={() => setPrelabelModal(null)}
+              >
+                close ✕
+              </button>
+            </div>
+
+            <div className="prelabel-form">
+              <div className="prelabel-form-row">
+                <label>Pages</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={doc.page_count}
+                  value={prelabelModal.startPage}
+                  onChange={(e) => {
+                    const n = Number(e.target.value);
+                    if (Number.isFinite(n)) {
+                      setPrelabelModal((prev) =>
+                        prev ? { ...prev, startPage: Math.max(1, n) } : prev,
+                      );
+                    }
+                  }}
+                />
+                <span style={{ color: "#94a3b8" }}>–</span>
+                <input
+                  type="number"
+                  min={prelabelModal.startPage}
+                  max={doc.page_count}
+                  value={prelabelModal.endPage}
+                  onChange={(e) => {
+                    const n = Number(e.target.value);
+                    if (Number.isFinite(n)) {
+                      setPrelabelModal((prev) =>
+                        prev
+                          ? {
+                              ...prev,
+                              endPage: Math.min(doc.page_count, n),
+                            }
+                          : prev,
+                      );
+                    }
+                  }}
+                />
+                <span style={{ color: "#64748b", fontSize: 12 }}>
+                  of {doc.page_count}
+                </span>
+              </div>
+
+              <div className="prelabel-form-row" style={{ alignItems: "flex-start" }}>
+                <label style={{ paddingTop: 4 }}>Labels</label>
+                <div className="prelabel-label-grid">
+                  {labels.map((l) => {
+                    const checked = prelabelModal.selectedLabels.has(l.id);
+                    return (
+                      <label key={l.id} className="prelabel-label-item">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            setPrelabelModal((prev) => {
+                              if (!prev) return prev;
+                              const next = new Set(prev.selectedLabels);
+                              if (e.target.checked) next.add(l.id);
+                              else next.delete(l.id);
+                              return { ...prev, selectedLabels: next };
+                            });
+                          }}
+                        />
+                        <span
+                          className="label-swatch"
+                          style={{ background: l.color }}
+                        />
+                        <span>{l.name}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="prelabel-form-row" style={{ justifyContent: "flex-end" }}>
+                <button
+                  className="btn ghost btn-xs"
+                  onClick={() => {
+                    setPrelabelModal((prev) =>
+                      prev
+                        ? {
+                            ...prev,
+                            selectedLabels: new Set(labels.map((l) => l.id)),
+                          }
+                        : prev,
+                    );
+                  }}
+                >
+                  select all
+                </button>
+                <button
+                  className="btn ghost btn-xs"
+                  onClick={() => {
+                    setPrelabelModal((prev) =>
+                      prev ? { ...prev, selectedLabels: new Set() } : prev,
+                    );
+                  }}
+                >
+                  clear
+                </button>
+                <span style={{ flex: 1 }} />
+                <button
+                  className="btn"
+                  disabled={
+                    prelabelModal.running ||
+                    prelabelModal.selectedLabels.size === 0
+                  }
+                  onClick={runPrelabelScan}
+                >
+                  {prelabelModal.running ? "scanning…" : "Run scan"}
+                </button>
+              </div>
+            </div>
+
+            {prelabelModal.error && (
+              <div className="error-banner" style={{ margin: "10px 0" }}>
+                {prelabelModal.error}
+              </div>
+            )}
+
+            {prelabelModal.running && prelabelModal.progress && (
+              <div className="prelabel-progress">
+                <div className="prelabel-progress-meta">
+                  {prelabelModal.progress.total > 0 ? (
+                    <>
+                      Scanning page{" "}
+                      <strong>
+                        {Math.min(
+                          prelabelModal.progress.done + 1,
+                          prelabelModal.progress.total,
+                        )}
+                      </strong>{" "}
+                      of {prelabelModal.progress.total} ·{" "}
+                      {prelabelModal.candidates.length} candidate
+                      {prelabelModal.candidates.length === 1 ? "" : "s"} so far
+                    </>
+                  ) : (
+                    "Connecting to Ollama…"
+                  )}
+                </div>
+                <progress
+                  max={prelabelModal.progress.total || 1}
+                  value={prelabelModal.progress.done}
+                />
+              </div>
+            )}
+
+            {(prelabelModal.lastModel || prelabelModal.candidates.length > 0) && (
+              <div style={{ color: "#64748b", fontSize: 12, margin: "10px 0 4px" }}>
+                {prelabelModal.lastModel && (
+                  <>
+                    Model: <code>{prelabelModal.lastModel}</code> ·{" "}
+                    {prelabelModal.lastPagesScanned} page(s) scanned ·{" "}
+                  </>
+                )}
+                {prelabelModal.candidates.length} pending candidate
+                {prelabelModal.candidates.length === 1 ? "" : "s"}
+              </div>
+            )}
+
+            {prelabelModal.candidates.length > 0 && (
+              <ul className="candidate-list">
+                {prelabelModal.candidates.map((c) => {
+                  const label = labelById.get(c.label_definition_id);
+                  const snippet =
+                    c.text.length > 200
+                      ? c.text.slice(0, 197) + "…"
+                      : c.text;
+                  return (
+                    <li key={c.suggestion_id}>
+                      <div className="candidate-meta">
+                        <span className="ann-page">
+                          p.{c.start_page_num}
+                          {c.end_page_num !== c.start_page_num
+                            ? `–${c.end_page_num}`
+                            : ""}
+                        </span>
+                        <span
+                          className="candidate-label"
+                          style={{
+                            background: (label?.color ?? "#1d4ed8") + "22",
+                            borderColor: label?.color ?? "#1d4ed8",
+                            color: label?.color ?? "#1d4ed8",
+                          }}
+                        >
+                          <span
+                            className="label-swatch"
+                            style={{ background: label?.color ?? "#1d4ed8" }}
+                          />
+                          {label?.name ?? `label #${c.label_definition_id}`}
+                        </span>
+                      </div>
+                      <div className="candidate-snippet">"{snippet}"</div>
+                      <div className="candidate-actions">
+                        <button
+                          className="btn ghost btn-xs"
+                          onClick={() => jumpToCandidate(c)}
+                          title="Scroll to this clause in the PDF (modal stays open)"
+                        >
+                          jump
+                        </button>
+                        <button
+                          className="btn ghost btn-xs danger"
+                          onClick={() => rejectCandidate(c.suggestion_id)}
+                        >
+                          reject
+                        </button>
+                        <button
+                          className="btn btn-xs"
+                          onClick={() => acceptCandidate(c.suggestion_id)}
+                        >
+                          accept
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            {!prelabelModal.running &&
+              prelabelModal.candidates.length === 0 &&
+              prelabelModal.lastModel !== null && (
+                <div className="empty-state" style={{ padding: 16 }}>
+                  No clauses matched the selected labels in this page range.
+                  Try widening the range or selecting more labels.
+                </div>
+              )}
           </div>
         </div>
       )}

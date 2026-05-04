@@ -80,16 +80,54 @@ class ProjectOut(_Base):
     labels: list[LabelOut] = Field(default_factory=list)
 
 
+class ProjectCreate(BaseModel):
+    name: str
+
+
 # --- Documents / Pages -----------------------------------------------------
 
 class DocumentOut(_Base):
     id: int
     project_id: int
+    category_id: int | None = None
     filename: str
     page_count: int
     status: str
     uploaded_by: int
     uploaded_at: datetime
+    last_modified_at: datetime
+    annotation_count: int = 0
+
+
+class DocumentUpdate(BaseModel):
+    """Mutate document-level metadata. v0: only `category_id` is editable
+    (set to null to unassign). All other doc state — filename, page_count,
+    status, etc. — is owned by the upload pipeline."""
+
+    category_id: int | None = None
+    # `model_fields_set` distinguishes "unset" from "explicitly null", so a
+    # null payload truly clears the category instead of being a no-op.
+
+
+class DocumentCategoryOut(_Base):
+    id: int
+    project_id: int
+    name: str
+    description: str | None = None
+    color: str
+    created_at: datetime
+
+
+class DocumentCategoryCreate(BaseModel):
+    name: str
+    description: str | None = None
+    color: str = "#6366f1"
+
+
+class DocumentCategoryUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    color: str | None = None
 
 
 class WordOut(BaseModel):
@@ -258,3 +296,41 @@ class StrategyScoreRow(BaseModel):
     rejected: int
     pending: int
     accuracy: float  # accepted_as_is / (accepted_as_is + modified) — ignores pending/rejected
+
+
+# --- Pre-labelling (clause discovery) -------------------------------------
+
+class PrelabelRequest(BaseModel):
+    start_page_num: int
+    end_page_num: int
+    # If null/empty, scan against every label in the document's project.
+    label_definition_ids: list[int] | None = None
+
+
+class PrelabelCandidate(_Base):
+    suggestion_id: int
+    label_definition_id: int
+    start_page_num: int
+    start_char: int
+    end_page_num: int
+    end_char: int
+    text: str
+    confidence: float
+
+
+class SuggestionListItem(_Base):
+    id: int
+    document_id: int
+    label_definition_id: int
+    text: str
+    start_page_num: int | None
+    start_char: int | None
+    end_page_num: int | None
+    end_char: int | None
+    strategy: str
+    model: str
+    confidence: float
+    suggested_attributes: list[SuggestedAttribute]
+    status: str
+    annotation_id: int | None
+    created_at: datetime

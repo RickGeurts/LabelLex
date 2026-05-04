@@ -22,19 +22,35 @@ clauses; humans correct; corrections feed the next training signal.
 backend/
   pyproject.toml
   app/
-    main.py            FastAPI entrypoint (lifespan creates tables + seeds)
-    config.py          Settings (DB url, storage dir, default user/project)
-    db.py              Engine, SessionLocal, Base, get_db dep
+    main.py            FastAPI entrypoint (lifespan: create_all + migrations + seed)
+    config.py          Settings (DB url, storage dir, default user/project, Ollama)
+    db.py              Engine, SessionLocal, Base, get_db, lightweight ALTER-TABLE shim
     models.py          ORM models
     schemas.py         Pydantic request/response models
     seed.py            Idempotent seed: default user, project, starter labels
     services/
-      pdf_parser.py    pymupdf → ParsedDocument (canonical text + bboxes)
-      storage.py       File store for uploaded PDFs
+      pdf_parser.py        pymupdf → ParsedDocument (canonical text + bboxes)
+      storage.py           File store for uploaded PDFs
+      attributes.py        collect_effective_attributes + value-type validation
+      label_counts.py      group-by helper for LabelOut.annotation_count
+      document_activity.py touch_document + attach_annotation_counts (per-doc)
+      ollama.py            sync httpx client, status() + generate_structured()
+      structure_detector.py TOC outline → MREL section-type classification
+      clause_discovery.py  per-page Ollama call → re-anchored verbatim quotes
+      strategies/          Strategy interface + zero_shot impl + router stub
     routers/
-      projects.py      /api/projects, /api/projects/:id/labels
-      documents.py     Upload, list, get, /pdf, /pages/:n
-      annotations.py   POST/GET/DELETE /api/annotations
+      projects.py      /api/projects (CRUD)
+      labels.py        /api/projects/:id/labels (CRUD)
+      attributes.py    /api/labels/:id/attributes (CRUD)
+      categories.py    /api/projects/:id/categories (CRUD)
+      documents.py     Upload, list, get, PATCH (category), /pdf, /pages/:n
+      annotations.py   POST/GET/PATCH/DELETE /api/annotations
+      search.py        /api/documents/:id/search
+      structure.py     /api/ollama/status, /api/documents/:id/detect-structure
+      suggestions.py   /api/labels/:id/suggest-attributes,
+                       /api/documents/:id/prelabel  (NDJSON stream),
+                       /api/documents/:id/suggestions,
+                       /api/suggestions/:id/accept|reject
   scripts/
     parse_pdf.py       Standalone parser test harness (run on a fixture PDF)
 
@@ -42,20 +58,27 @@ frontend/
   package.json
   vite.config.ts       Dev proxy: /api → http://127.0.0.1:8000
   src/
-    main.tsx, App.tsx
+    main.tsx, App.tsx  App owns only the route table; nested layout in ProjectShell
     api.ts             Typed API client
     types.ts           Shared types (mirror backend schemas)
     pages/
-      ProjectPage.tsx       Upload + document list
-      DocumentViewer.tsx    Loads PDF, manages page nav, owns annotation state
+      ProjectsListPage.tsx   /projects — list + create + delete projects
+      ProjectShell.tsx       /projects/:id layout (sidebar + Outlet)
+      ProjectPage.tsx        /projects/:id — drag-drop upload + document table
+      ProjectSettingsPage.tsx /projects/:id/settings — document categories CRUD
+      LabelsPage.tsx         /projects/:id/labels — labels admin
+      DocumentViewer.tsx     /projects/:id/documents/:docId — PDF viewer
     components/
-      PdfPageView.tsx       pdf.js canvas + word-bbox overlay + label picker
+      PdfPage.tsx            pdf.js canvas + word-bbox overlay + label picker
+      AnnotationListPanel.tsx Sticky right-side annotation list
+    utils/
+      spans.ts               lineRects, pageAnnotationSlice, effectiveAttributes
     styles.css
     vite-env.d.ts
 
-storage/uploads/{id}.pdf   Uploaded PDFs (gitignored)
-backend/labellex.db        SQLite (gitignored)
-example_*.pdf              Test fixtures (gitignored)
+storage/uploads/{id}.pdf       Uploaded PDFs (gitignored)
+backend/labellex.db[-wal|-shm] SQLite + WAL sidecars (gitignored)
+example_*.pdf                  Test fixtures (gitignored)
 ```
 
 ## Run
@@ -118,6 +141,23 @@ These are load-bearing decisions; check before reworking.
   render only as a sized placeholder. Annotation / selection / search
   highlights render even on inactive pages so navigation feedback shows
   immediately.
+- **Routing is project-scoped.** `/projects` is the picker; everything
+  else nests under `/projects/:projectId/...` (`labels`, `settings`,
+  `documents/:documentId`). `ProjectShell` reads `:projectId` from
+  `useParams`, fetches the project, and renders the sidebar + nested
+  `<Outlet>`. Pages read params themselves (no projectId props passed
+  from App). The labels/settings pages read `refreshProject` from
+  `useOutletContext` so sidebar state stays in sync after admin edits.
+- **DB schema migrations are hand-rolled.** Until we adopt Alembic, new
+  columns on existing tables go through `db.run_lightweight_migrations()`
+  (called from lifespan). It checks `PRAGMA table_info` and runs ALTER
+  TABLE + backfill if the column is missing. Idempotent. New tables come
+  through `Base.metadata.create_all` as usual. Two columns are managed
+  this way today: `Document.last_modified_at` and `Document.category_id`.
+- **Document activity is tracked centrally.** `services/document_activity.touch_document()`
+  bumps `Document.last_modified_at`; called from every annotation
+  create/update/delete and from `accept_suggestion`. Single point of
+  truth so the documents-table "last activity" column doesn't drift.
 
 ## Conventions
 
@@ -149,6 +189,27 @@ These are load-bearing decisions; check before reworking.
 - **The annotation overlay is `pointer-events: auto`** so users can click
   to delete; this means it can swallow clicks on words it covers. Keep an
   eye on this when adding selection features.
+- **SQLite is in WAL mode.** Connect-time PRAGMAs in `db.py` set
+  `journal_mode=WAL` and `busy_timeout=5000`. Two consequences: (1)
+  sidecar files `labellex.db-wal` and `labellex.db-shm` appear on disk —
+  gitignored as `*.db-wal` / `*.db-shm`; never delete them while the
+  server is running, the journal contains uncommitted state. (2)
+  Contended writes wait up to 5 s for the lock instead of erroring
+  instantly. WAL was added because long-running streaming endpoints
+  (pre-label scans) used to starve concurrent reads.
+- **Don't put side effects inside `setState` updaters.** React StrictMode
+  invokes `(prev) => ...` callbacks twice in dev to surface impure code.
+  An `api.x(...)` call inside one fires the request twice — and since
+  SQLite is single-writer, the second collides on the lock. Pattern: read
+  state from closure, set running=true with a pure updater, then fire
+  the side effect at the top level of the handler.
+- **`uvicorn --reload` sometimes hangs on file changes** while a
+  streaming request is in flight (or sometimes for no obvious reason).
+  Symptom: log says "WatchFiles detected changes... Reloading" but no
+  second "Started server process" appears, and the running worker still
+  serves stale code. Fix: kill the parent reloader + worker PIDs and
+  restart uvicorn cleanly. Do this any time a route looks like it didn't
+  pick up a backend edit.
 
 ## Status
 
@@ -224,8 +285,34 @@ These are load-bearing decisions; check before reworking.
   name (Enter saves, Esc cancels, blur saves if non-empty). Annotation
   usage counts surfaced from backend (`LabelOut.annotation_count`,
   computed via group-by in `services/label_counts.attach_annotation_counts`).
+- ✅ Multi-project (single-user). `/projects` lists, creates, deletes
+  projects; `Project.name` is unique per user. New projects start empty —
+  the admin defines labels (under `/projects/:id/labels`) and document
+  categories (under `/projects/:id/settings`) before uploading. Sidebar
+  shows the current project name with a `← Switch project` link.
+- ✅ Document table view at `/projects/:id` replacing the v0 list.
+  Columns: filename + page count, category (inline `<select>` to
+  assign/change), status pill (labelled / unlabelled / parsing / parse
+  failed), annotation count, last modified. Default sort is server-side
+  by `last_modified_at` desc (so docs you just touched bubble up).
+  `attach_annotation_counts` in `services/document_activity` powers the
+  annotation column via a single GROUP BY per request.
+- ✅ Drag-and-drop bulk PDF upload above the document table. Drop zone
+  highlights on dragover; non-PDF files are filtered with a count of
+  skipped files surfaced. Uploads run **sequentially** (pymupdf parsing
+  is CPU-bound; parallel hurts) with per-file status queued → uploading
+  → done | failed. Failed uploads show the error inline; "clear" wipes
+  the finished-uploads list once all are settled.
+- ✅ Document categories (per-project). `DocumentCategory` table scoped
+  to a project; documents carry an optional `category_id` FK that nulls
+  on category delete (handled in router code, since SQLite FK
+  enforcement is off by default). Admin authors categories at
+  `/projects/:id/settings` (name, description, color preset). Inline
+  picker on the documents table assigns/changes per row, persisting via
+  `PATCH /api/documents/:id`.
 - ⬜ Inter-annotation relations.
-- ⬜ Multi-user (auth, sessions, roles, projects, per-document checkout).
+- ⬜ Multi-user (auth, sessions, roles, per-document checkout). Projects
+  exist but everything still attributes to `settings.default_user_id`.
 - ⬜ Postgres + docker-compose.
 - ✅ Ollama integration v0: structure detection.
   - `app/services/ollama.py` — sync httpx client. `status()` is non-raising
@@ -253,5 +340,41 @@ These are load-bearing decisions; check before reworking.
     180). Set up Ollama with: install (`winget install Ollama.Ollama`),
     pull the model (`ollama pull qwen2.5:14b-instruct`), and the daemon
     auto-starts on Windows.
-- ⬜ Ollama: pre-labelling clauses for MREL features.
+- ✅ Ollama: pre-labelling clauses for MREL features (clause discovery v0).
+  - `app/services/clause_discovery.py` — per-page Ollama call with a JSON
+    schema constraining the response to `{candidates: [{label, quote}]}`,
+    where `label` is enum-bound to the names of the labels in scope. Each
+    returned quote is re-anchored to the page's text via exact substring
+    match (with a whitespace-tolerant fallback because pages have hard
+    line breaks the model often normalises).
+  - `POST /api/documents/{id}/prelabel` is a **streaming NDJSON endpoint**.
+    Body `{start_page_num, end_page_num, label_definition_ids?}`. Yields
+    one event per line:
+    `{"type":"started","model","total_pages"}`,
+    `{"type":"page_done","page_num","pages_done","pages_total","candidates":[…]}`,
+    `{"type":"done"}` or `{"type":"error","message"}`. Per-page commits
+    mean candidates from completed pages stay durable even if the scan
+    bails mid-way. Pre-flight failures (404/400/503) still raise as
+    HTTPException before the stream starts.
+  - `GET /api/documents/{id}/suggestions?status=pending` — re-fetch
+    pending candidates so the modal is resumable across sessions.
+  - `POST /api/suggestions/{id}/accept` — promotes the suggestion to a
+    real `Annotation` (deliberately bypasses required-attribute
+    validation; the labeller fills attrs in the editor after accepting).
+    Bumps `Document.last_modified_at`.
+  - `POST /api/suggestions/{id}/reject` — flips status to `rejected`.
+  - Frontend: 🪄 Pre-label toolbar button → modal with page-range inputs
+    + label checkboxes (default scope = leaf labels). While scanning, a
+    **live progress bar** (`<progress>` driven by `pages_done/pages_total`)
+    updates per page; new candidates stream into the review list as they
+    arrive. Each candidate row: snippet, label badge, page, jump / reject
+    / accept. Jump uses the existing search-highlight mechanism (yellow
+    line rectangles) and keeps the modal open. Pending suggestions are
+    seeded from the server so review can resume across sessions.
+  - Per-page chunking trade-off: clauses straddling a page break get
+    split into per-page candidates — labeller can extend via "edit
+    span" once accepted.
+- ⬜ Ollama: few-shot strategy (use accepted annotations as in-context
+  examples) and a per-(label, attribute) accuracy scoreboard surfacing
+  what zero-shot vs. few-shot is doing on each slot.
 - ⬜ Printed-page-number extraction.

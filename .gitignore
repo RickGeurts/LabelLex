@@ -48,6 +48,9 @@ storage/
 *.sqlite
 *.sqlite3
 *.db
+*.db-wal
+*.db-shm
+*.db-journal
 
 # Sample / test PDFs (don't commit user data)
 example_*.pdf

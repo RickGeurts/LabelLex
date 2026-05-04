@@ -40,6 +40,7 @@ from ..schemas import (
     AnnotationUpdate,
 )
 from ..services.attributes import collect_effective_attributes, validate_value
+from ..services.document_activity import touch_document
 from .suggestions import resolve_suggestion
 
 
@@ -163,6 +164,7 @@ def create_annotation(payload: AnnotationCreate, db: Session = Depends(get_db)) 
             AnnotationAttribute(attribute_def_id=attr_def.id, value=value)
         )
     db.add(ann)
+    touch_document(db, payload.document_id)
     db.commit()
     db.refresh(ann)
 
@@ -241,6 +243,7 @@ def update_annotation(
                 AnnotationAttribute(attribute_def_id=attr_def.id, value=value)
             )
 
+    touch_document(db, ann.document_id)
     db.commit()
     db.refresh(ann)
 
@@ -272,5 +275,7 @@ def delete_annotation(annotation_id: int, db: Session = Depends(get_db)) -> None
     ann = db.get(Annotation, annotation_id)
     if ann is None:
         raise HTTPException(status_code=404, detail="Annotation not found")
+    document_id = ann.document_id
     db.delete(ann)
+    touch_document(db, document_id)
     db.commit()

@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db
-from ..models import Document, Page, Project
-from ..schemas import DocumentOut, PageOut
+from ..models import Document, DocumentCategory, Page, Project
+from ..schemas import DocumentOut, DocumentUpdate, PageOut
 from ..services import storage
+from ..services.document_activity import attach_annotation_counts
 from ..services.pdf_parser import parse_pdf
 
 
@@ -20,13 +21,15 @@ router = APIRouter(prefix="/api", tags=["documents"])
 
 @router.get("/projects/{project_id}/documents", response_model=list[DocumentOut])
 def list_documents(project_id: int, db: Session = Depends(get_db)) -> list[Document]:
-    return list(
+    docs = list(
         db.scalars(
             select(Document)
             .where(Document.project_id == project_id)
-            .order_by(Document.uploaded_at.desc())
+            .order_by(Document.last_modified_at.desc())
         ).all()
     )
+    attach_annotation_counts(db, docs)
+    return docs
 
 
 @router.post(
@@ -90,6 +93,39 @@ def get_document(document_id: int, db: Session = Depends(get_db)) -> Document:
     doc = db.get(Document, document_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
+    attach_annotation_counts(db, [doc])
+    return doc
+
+
+@router.patch("/documents/{document_id}", response_model=DocumentOut)
+def update_document(
+    document_id: int,
+    payload: DocumentUpdate,
+    db: Session = Depends(get_db),
+) -> Document:
+    doc = db.get(Document, document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    data = payload.model_dump(exclude_unset=True)
+    if "category_id" in data:
+        new_cat_id = data["category_id"]
+        if new_cat_id is None:
+            doc.category_id = None
+        else:
+            cat = db.get(DocumentCategory, new_cat_id)
+            if cat is None:
+                raise HTTPException(
+                    status_code=404, detail="Category not found"
+                )
+            if cat.project_id != doc.project_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Category belongs to a different project",
+                )
+            doc.category_id = new_cat_id
+    db.commit()
+    db.refresh(doc)
+    attach_annotation_counts(db, [doc])
     return doc
 
 

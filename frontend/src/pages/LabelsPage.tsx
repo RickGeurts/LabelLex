@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useOutletContext, useParams } from "react-router-dom";
 
 import { api } from "../api";
 import type {
@@ -8,12 +9,13 @@ import type {
   Label,
   LabelCreate,
   LabelUpdate,
+  Project,
   ValueType,
 } from "../types";
 
-interface Props {
-  projectId: number;
-  onChange?: () => void;
+interface ProjectShellContext {
+  project: Project;
+  refreshProject: () => void;
 }
 
 const DEFAULT_COLOR = "#3b82f6";
@@ -95,7 +97,11 @@ interface InlineRenameState {
   draft: string;
 }
 
-export default function LabelsPage({ projectId, onChange }: Props) {
+export default function LabelsPage() {
+  const { projectId: projectIdParam } = useParams();
+  const projectId = Number(projectIdParam);
+  const ctx = useOutletContext<ProjectShellContext | undefined>();
+  const onChange = ctx?.refreshProject;
   const [labels, setLabels] = useState<Label[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [createForm, setCreateForm] = useState<CreateFormState | null>(null);

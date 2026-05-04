@@ -7,15 +7,23 @@ import type {
   AttributeUpdate,
   DetectStructureResponse,
   Document,
+  DocumentCategory,
+  DocumentCategoryCreate,
+  DocumentCategoryUpdate,
+  DocumentUpdate,
   Label,
   LabelCreate,
   LabelUpdate,
   OllamaStatus,
   Page,
+  PrelabelEvent,
+  PrelabelRequest,
   Project,
+  ProjectCreate,
   SearchHit,
   SuggestAttributesIn,
   SuggestAttributesOut,
+  SuggestionListItem,
 } from "./types";
 
 async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
@@ -32,6 +40,14 @@ async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  listProjects: () => jsonRequest<Project[]>("/api/projects"),
+  createProject: (payload: ProjectCreate) =>
+    jsonRequest<Project>("/api/projects", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  deleteProject: (id: number) =>
+    jsonRequest<void>(`/api/projects/${id}`, { method: "DELETE" }),
   getProject: (id: number) => jsonRequest<Project>(`/api/projects/${id}`),
   listLabels: (projectId: number) => jsonRequest<Label[]>(`/api/projects/${projectId}/labels`),
   createLabel: (projectId: number, payload: LabelCreate) =>
@@ -51,6 +67,28 @@ export const api = {
   listDocuments: (projectId: number) =>
     jsonRequest<Document[]>(`/api/projects/${projectId}/documents`),
   getDocument: (id: number) => jsonRequest<Document>(`/api/documents/${id}`),
+  updateDocument: (id: number, payload: DocumentUpdate) =>
+    jsonRequest<Document>(`/api/documents/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+
+  listCategories: (projectId: number) =>
+    jsonRequest<DocumentCategory[]>(
+      `/api/projects/${projectId}/categories`,
+    ),
+  createCategory: (projectId: number, payload: DocumentCategoryCreate) =>
+    jsonRequest<DocumentCategory>(`/api/projects/${projectId}/categories`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  updateCategory: (categoryId: number, payload: DocumentCategoryUpdate) =>
+    jsonRequest<DocumentCategory>(`/api/categories/${categoryId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteCategory: (categoryId: number) =>
+    jsonRequest<void>(`/api/categories/${categoryId}`, { method: "DELETE" }),
   pdfUrl: (id: number) => `/api/documents/${id}/pdf`,
   getPage: (documentId: number, pageNum: number) =>
     jsonRequest<Page>(`/api/documents/${documentId}/pages/${pageNum}`),
@@ -102,6 +140,52 @@ export const api = {
       `/api/labels/${labelId}/suggest-attributes`,
       { method: "POST", body: JSON.stringify(payload) },
     ),
+  prelabelDocumentStream: async (
+    documentId: number,
+    payload: PrelabelRequest,
+    onEvent: (e: PrelabelEvent) => void,
+  ): Promise<void> => {
+    const res = await fetch(`/api/documents/${documentId}/prelabel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`${res.status} ${res.statusText}: ${body}`);
+    }
+    if (!res.body) {
+      throw new Error("Stream not supported by this browser");
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (line) onEvent(JSON.parse(line) as PrelabelEvent);
+      }
+    }
+    const tail = buf.trim();
+    if (tail) onEvent(JSON.parse(tail) as PrelabelEvent);
+  },
+  listDocumentSuggestions: (documentId: number, status: string = "pending") =>
+    jsonRequest<SuggestionListItem[]>(
+      `/api/documents/${documentId}/suggestions?status=${encodeURIComponent(status)}`,
+    ),
+  acceptSuggestion: (suggestionId: number) =>
+    jsonRequest<Annotation>(`/api/suggestions/${suggestionId}/accept`, {
+      method: "POST",
+    }),
+  rejectSuggestion: (suggestionId: number) =>
+    jsonRequest<void>(`/api/suggestions/${suggestionId}/reject`, {
+      method: "POST",
+    }),
 
   async uploadDocument(projectId: number, file: File): Promise<Document> {
     const form = new FormData();
