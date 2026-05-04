@@ -15,12 +15,14 @@ import type {
   Annotation,
   AnnotationAttributeIO,
   AnnotationCreate,
+  AnnotationRelation,
   AttributeDefinition,
   DetectedSection,
   Document as DocModel,
   Label,
   Page as PageModel,
   PrelabelCandidate,
+  RelationDefinition,
   SearchHit,
 } from "../types";
 import PdfPage from "../components/PdfPage";
@@ -155,6 +157,19 @@ export default function DocumentViewer() {
     | { kind: "result"; model: string; sections: DetectedSection[] };
   const [detectModal, setDetectModal] = useState<DetectModalState | null>(null);
 
+  // Inter-annotation relations.
+  const [relations, setRelations] = useState<AnnotationRelation[]>([]);
+  const [relationDefs, setRelationDefs] = useState<RelationDefinition[]>([]);
+  // Linking mode is the "click another annotation to link" workflow. While
+  // active, the annotation editor is closed, a top banner explains the
+  // mode, and clicking any other annotation routes to the type picker
+  // instead of opening that annotation's editor.
+  interface LinkingState {
+    fromAnnotationId: number;
+    picker: { targetId: number; x: number; y: number } | null;
+  }
+  const [linkingMode, setLinkingMode] = useState<LinkingState | null>(null);
+
   // Ollama-driven clause discovery (pre-labelling).
   interface PrelabelState {
     startPage: number;
@@ -196,13 +211,17 @@ export default function DocumentViewer() {
       api.listLabels(projectId),
       api.listAnnotations(documentId),
       api.getAllPages(documentId),
+      api.listDocumentRelations(documentId),
+      api.listRelationDefs(projectId),
     ])
-      .then(([d, ls, anns, ps]) => {
+      .then(([d, ls, anns, ps, rels, rdefs]) => {
         if (cancelled) return;
         setDoc(d);
         setLabels(ls);
         setAnnotations(anns);
         setPages(ps);
+        setRelations(rels);
+        setRelationDefs(rdefs);
       })
       .catch((e) => !cancelled && setError(String(e)));
 
@@ -314,7 +333,13 @@ export default function DocumentViewer() {
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (spanConfirm) {
+        if (linkingMode?.picker) {
+          e.preventDefault();
+          setLinkingMode({ ...linkingMode, picker: null });
+        } else if (linkingMode) {
+          e.preventDefault();
+          setLinkingMode(null);
+        } else if (spanConfirm) {
           e.preventDefault();
           setSpanConfirm(null);
           setResizingAnnotationId(null);
@@ -343,7 +368,7 @@ export default function DocumentViewer() {
     return () => window.removeEventListener("keydown", onKey);
     // scrollToPage is defined below; we capture it fresh on each render via
     // the closure. eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc, popover, resizingAnnotationId, handleDrag, spanConfirm, currentPage]);
+  }, [doc, popover, resizingAnnotationId, handleDrag, spanConfirm, currentPage, linkingMode]);
 
   // ---------- Helpers ----------------------------------------------------
   const labelById = useMemo(
@@ -369,12 +394,13 @@ export default function DocumentViewer() {
   // ---------- Drag-to-select / resize ------------------------------------
   const onWordPointerDown = useCallback(
     (pageNum: number, wordIdx: number, e: React.PointerEvent) => {
-      // While popovers / handle drag / confirm / resize are in progress,
-      // word clicks must not start a new drag.
+      // While popovers / handle drag / confirm / resize / linking are in
+      // progress, word clicks must not start a new drag.
       if (popover) return;
       if (handleDragRef.current) return;
       if (spanConfirm) return;
       if (resizingAnnotationId !== null) return;
+      if (linkingMode) return;
       e.preventDefault();
       const range: CrossPageRange = {
         start: { page: pageNum, wordIdx },
@@ -383,7 +409,7 @@ export default function DocumentViewer() {
       dragRef.current = range;
       setDrag(range);
     },
-    [popover, spanConfirm, resizingAnnotationId],
+    [popover, spanConfirm, resizingAnnotationId, linkingMode],
   );
 
   const onWordPointerEnter = useCallback((pageNum: number, wordIdx: number) => {
@@ -679,6 +705,18 @@ export default function DocumentViewer() {
   const onAnnotationClick = (ann: Annotation, e: React.MouseEvent) => {
     e.stopPropagation();
     if (resizingAnnotationId !== null) return; // resize mode in progress
+
+    // Linking mode: route the click to the type picker instead of
+    // opening this annotation's editor. Self-link is rejected silently.
+    if (linkingMode) {
+      if (ann.id === linkingMode.fromAnnotationId) return;
+      setLinkingMode({
+        ...linkingMode,
+        picker: { targetId: ann.id, x: e.clientX + 6, y: e.clientY + 6 },
+      });
+      return;
+    }
+
     const values: Record<number, unknown> = {};
     for (const a of ann.attributes) values[a.attribute_def_id] = a.value;
     setPopover({
@@ -691,6 +729,47 @@ export default function DocumentViewer() {
       x: e.clientX + 6,
       y: e.clientY + 6,
     });
+  };
+
+  const refreshRelations = useCallback(() => {
+    api
+      .listDocumentRelations(documentId)
+      .then(setRelations)
+      .catch((err) => setError(String(err)));
+  }, [documentId]);
+
+  const startLinkingFromEditor = () => {
+    if (!popover || popover.kind !== "editor") return;
+    setLinkingMode({ fromAnnotationId: popover.annotationId, picker: null });
+    setPopover(null);
+  };
+
+  const cancelLinking = useCallback(() => {
+    setLinkingMode(null);
+  }, []);
+
+  const submitRelation = (relationDefId: number) => {
+    if (!linkingMode || !linkingMode.picker) return;
+    const fromId = linkingMode.fromAnnotationId;
+    const toId = linkingMode.picker.targetId;
+    api
+      .createRelation({
+        from_annotation_id: fromId,
+        to_annotation_id: toId,
+        relation_def_id: relationDefId,
+      })
+      .then(() => {
+        refreshRelations();
+        setLinkingMode(null);
+      })
+      .catch((err) => setError(String(err)));
+  };
+
+  const deleteRelationById = (relationId: number) => {
+    api
+      .deleteRelation(relationId)
+      .then(refreshRelations)
+      .catch((err) => setError(String(err)));
   };
 
   const submitEditor = () => {
@@ -1637,6 +1716,61 @@ export default function DocumentViewer() {
         </div>
       )}
 
+      {/* Linking-mode banner */}
+      {linkingMode && (
+        <div className="resize-banner">
+          <span>
+            {linkingMode.picker
+              ? "Pick a relation type, or click a different annotation to retarget. Esc to cancel."
+              : "Click another annotation to link from this one. Esc to cancel."}
+          </span>
+          <span style={{ flex: 1 }} />
+          <button className="btn ghost btn-xs" onClick={cancelLinking}>
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {/* Relation-type picker (rendered while linkingMode.picker is set) */}
+      {linkingMode?.picker && (
+        <div
+          className="label-picker"
+          style={{
+            position: "fixed",
+            left: linkingMode.picker.x,
+            top: linkingMode.picker.y,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="picker-title">Relation type</div>
+          {relationDefs.length === 0 ? (
+            <div
+              style={{ padding: "6px 8px", fontSize: 12, color: "#94a3b8" }}
+            >
+              No relation types defined yet. Add them in project settings.
+            </div>
+          ) : (
+            relationDefs.map((rd) => (
+              <button
+                key={rd.id}
+                className="label-row"
+                onClick={() => submitRelation(rd.id)}
+                title={rd.description ?? undefined}
+              >
+                <span
+                  className="label-swatch"
+                  style={{ background: rd.color }}
+                />
+                <span>{rd.name}</span>
+              </button>
+            ))
+          )}
+          <button className="picker-cancel" onClick={cancelLinking}>
+            cancel
+          </button>
+        </div>
+      )}
+
       {/* Span-resize confirmation popup */}
       {spanConfirm && (
         <div
@@ -1699,7 +1833,12 @@ export default function DocumentViewer() {
           onEditorSave={submitEditor}
           onEditorDelete={deleteFromEditor}
           onEditorResize={startResize}
+          onEditorStartLink={startLinkingFromEditor}
           onRequestSuggestion={requestSuggestion}
+          relations={relations}
+          relationDefs={relationDefs}
+          onDeleteRelation={deleteRelationById}
+          onJumpToAnnotation={jumpToAnnotation}
         />
       )}
     </>
@@ -1962,7 +2101,12 @@ function PopoverShell({
   onEditorSave,
   onEditorDelete,
   onEditorResize,
+  onEditorStartLink,
   onRequestSuggestion,
+  relations,
+  relationDefs,
+  onDeleteRelation,
+  onJumpToAnnotation,
 }: {
   popover: PopoverState;
   labels: Label[];
@@ -1977,7 +2121,12 @@ function PopoverShell({
   onEditorSave: () => void;
   onEditorDelete: () => void;
   onEditorResize: () => void;
+  onEditorStartLink: () => void;
   onRequestSuggestion: () => void;
+  relations: AnnotationRelation[];
+  relationDefs: RelationDefinition[];
+  onDeleteRelation: (id: number) => void;
+  onJumpToAnnotation: (pageNum: number, annotationId: number) => void;
 }) {
   // Position is fixed in the viewport (not inside any scrolling page).
   const style: React.CSSProperties = { left: popover.x, top: popover.y, position: "fixed" };
@@ -2072,6 +2221,16 @@ function PopoverShell({
           No attributes defined for this label.
         </div>
       )}
+      <RelationsSection
+        annotationId={ann.id}
+        relations={relations}
+        relationDefs={relationDefs}
+        annotations={annotations}
+        labelById={labelById}
+        onDeleteRelation={onDeleteRelation}
+        onStartLink={onEditorStartLink}
+        onJumpToAnnotation={onJumpToAnnotation}
+      />
       <div style={{ display: "flex", gap: 6, justifyContent: "space-between", padding: "6px 4px 0 4px" }}>
         <div style={{ display: "flex", gap: 6 }}>
           <button className="btn ghost btn-xs danger" onClick={onEditorDelete}>delete</button>
@@ -2088,6 +2247,107 @@ function PopoverShell({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function RelationsSection({
+  annotationId,
+  relations,
+  relationDefs,
+  annotations,
+  labelById,
+  onDeleteRelation,
+  onStartLink,
+  onJumpToAnnotation,
+}: {
+  annotationId: number;
+  relations: AnnotationRelation[];
+  relationDefs: RelationDefinition[];
+  annotations: Annotation[];
+  labelById: Map<number, Label>;
+  onDeleteRelation: (id: number) => void;
+  onStartLink: () => void;
+  onJumpToAnnotation: (pageNum: number, annotationId: number) => void;
+}) {
+  const annById = new Map(annotations.map((a) => [a.id, a] as const));
+  const defById = new Map(relationDefs.map((r) => [r.id, r] as const));
+  const relevant = relations.filter(
+    (r) =>
+      r.from_annotation_id === annotationId ||
+      r.to_annotation_id === annotationId,
+  );
+  return (
+    <div className="editor-relations">
+      <div className="editor-relations-header">
+        <span>Relations</span>
+        <span style={{ flex: 1 }} />
+        <button className="btn ghost btn-xs" onClick={onStartLink}>
+          + Link
+        </button>
+      </div>
+      {relevant.length === 0 ? (
+        <div className="editor-relations-empty">No relations yet.</div>
+      ) : (
+        <ul className="editor-relations-list">
+          {relevant.map((rel) => {
+            const def = defById.get(rel.relation_def_id);
+            const isOutgoing = rel.from_annotation_id === annotationId;
+            const otherId = isOutgoing
+              ? rel.to_annotation_id
+              : rel.from_annotation_id;
+            const other = annById.get(otherId);
+            const otherLabel = other
+              ? labelById.get(other.label_definition_id)
+              : undefined;
+            const snippet = other
+              ? other.text.length > 40
+                ? other.text.slice(0, 37) + "…"
+                : other.text
+              : `(annotation #${otherId} not on this document)`;
+            return (
+              <li key={rel.id} className="editor-relation-row">
+                <span className="rel-arrow">{isOutgoing ? "→" : "←"}</span>
+                <span
+                  className="rel-type"
+                  style={{
+                    background: (def?.color ?? "#64748b") + "22",
+                    color: def?.color ?? "#64748b",
+                    borderColor: def?.color ?? "#64748b",
+                  }}
+                >
+                  {def?.name ?? `type #${rel.relation_def_id}`}
+                </span>
+                <button
+                  className="rel-target"
+                  onClick={() =>
+                    other && onJumpToAnnotation(other.start_page_num, other.id)
+                  }
+                  title={otherLabel?.name ?? undefined}
+                >
+                  {other && (
+                    <span
+                      className="label-swatch"
+                      style={{ background: otherLabel?.color ?? "#1d4ed8" }}
+                    />
+                  )}
+                  <span className="rel-snippet">"{snippet}"</span>
+                  {other && (
+                    <span className="rel-page">p.{other.start_page_num}</span>
+                  )}
+                </button>
+                <button
+                  className="rel-delete"
+                  onClick={() => onDeleteRelation(rel.id)}
+                  title="Remove this relation"
+                >
+                  ×
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 }

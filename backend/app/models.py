@@ -242,6 +242,69 @@ class AnnotationAttribute(Base):
     attribute_def: Mapped[AttributeDefinition] = relationship()
 
 
+class RelationDefinition(Base):
+    """Admin-defined per-project relation type (e.g. 'modifies',
+    'cross-references', 'subordinates-to'). Annotations are linked to
+    each other via concrete `AnnotationRelation` rows whose `relation_def_id`
+    points here.
+    """
+
+    __tablename__ = "relation_definitions"
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_reldef_project_name"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE")
+    )
+    name: Mapped[str] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    color: Mapped[str] = mapped_column(String(16), default="#64748b")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+
+
+class AnnotationRelation(Base):
+    """A directed link between two annotations on the same document.
+
+    Same-document constraint is enforced in the router (rejecting
+    cross-document relations for v0). Self-loops (from == to) are also
+    rejected. Cascading on annotation/relation-def delete is handled in
+    Python because SQLite FK enforcement is off on this engine — the
+    relation rows are removed explicitly before the parent goes away.
+    """
+
+    __tablename__ = "annotation_relations"
+    __table_args__ = (
+        UniqueConstraint(
+            "from_annotation_id",
+            "to_annotation_id",
+            "relation_def_id",
+            name="uq_annrel_from_to_def",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    document_id: Mapped[int] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE")
+    )
+    from_annotation_id: Mapped[int] = mapped_column(
+        ForeignKey("annotations.id", ondelete="CASCADE")
+    )
+    to_annotation_id: Mapped[int] = mapped_column(
+        ForeignKey("annotations.id", ondelete="CASCADE")
+    )
+    relation_def_id: Mapped[int] = mapped_column(
+        ForeignKey("relation_definitions.id", ondelete="CASCADE")
+    )
+    created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+
+
 class AnnotationSuggestion(Base):
     """A model-proposed set of attribute values for a (label, clause) pair.
 

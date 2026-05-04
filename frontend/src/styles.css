@@ -1100,3 +1100,94 @@ textarea { resize: vertical; }
   padding: 0;
 }
 .color-preset:hover { transform: scale(1.15); }
+
+/* --- Annotation editor: relations section ---------------------------- */
+.editor-relations {
+  border-top: 1px solid #e2e8f0;
+  margin-top: 6px;
+  padding: 6px 4px 4px 4px;
+}
+.editor-relations-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #64748b;
+  font-weight: 600;
+  padding: 0 4px 4px 4px;
+}
+.editor-relations-empty {
+  font-size: 12px;
+  color: #94a3b8;
+  padding: 0 4px 4px 4px;
+}
+.editor-relations-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 160px;
+  overflow-y: auto;
+}
+.editor-relation-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px;
+  font-size: 12.5px;
+}
+.rel-arrow {
+  color: #64748b;
+  font-weight: 600;
+  width: 14px;
+  text-align: center;
+}
+.rel-type {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.rel-target {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  min-width: 0;
+}
+.rel-target:hover { background: #f1f5f9; }
+.rel-snippet {
+  font-style: italic;
+  color: #475569;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.rel-page {
+  font-size: 11px;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+}
+.rel-delete {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.rel-delete:hover { color: #b91c1c; }

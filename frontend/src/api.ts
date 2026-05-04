@@ -1,6 +1,8 @@
 import type {
   Annotation,
   AnnotationCreate,
+  AnnotationRelation,
+  AnnotationRelationCreate,
   AnnotationUpdate,
   AttributeCreate,
   AttributeDefinition,
@@ -20,6 +22,9 @@ import type {
   PrelabelRequest,
   Project,
   ProjectCreate,
+  RelationDefinition,
+  RelationDefinitionCreate,
+  RelationDefinitionUpdate,
   SearchHit,
   SuggestAttributesIn,
   SuggestAttributesOut,
@@ -89,6 +94,35 @@ export const api = {
     }),
   deleteCategory: (categoryId: number) =>
     jsonRequest<void>(`/api/categories/${categoryId}`, { method: "DELETE" }),
+
+  listRelationDefs: (projectId: number) =>
+    jsonRequest<RelationDefinition[]>(
+      `/api/projects/${projectId}/relation-defs`,
+    ),
+  createRelationDef: (projectId: number, payload: RelationDefinitionCreate) =>
+    jsonRequest<RelationDefinition>(
+      `/api/projects/${projectId}/relation-defs`,
+      { method: "POST", body: JSON.stringify(payload) },
+    ),
+  updateRelationDef: (defId: number, payload: RelationDefinitionUpdate) =>
+    jsonRequest<RelationDefinition>(`/api/relation-defs/${defId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  deleteRelationDef: (defId: number) =>
+    jsonRequest<void>(`/api/relation-defs/${defId}`, { method: "DELETE" }),
+
+  listDocumentRelations: (documentId: number) =>
+    jsonRequest<AnnotationRelation[]>(
+      `/api/documents/${documentId}/relations`,
+    ),
+  createRelation: (payload: AnnotationRelationCreate) =>
+    jsonRequest<AnnotationRelation>("/api/relations", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    }),
+  deleteRelation: (id: number) =>
+    jsonRequest<void>(`/api/relations/${id}`, { method: "DELETE" }),
   pdfUrl: (id: number) => `/api/documents/${id}/pdf`,
   getPage: (documentId: number, pageNum: number) =>
     jsonRequest<Page>(`/api/documents/${documentId}/pages/${pageNum}`),

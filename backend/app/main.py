@@ -19,6 +19,7 @@ from .routers import (
     documents,
     labels,
     projects,
+    relations,
     search,
     structure,
     suggestions,
@@ -51,6 +52,7 @@ app.include_router(attributes.router)
 app.include_router(categories.router)
 app.include_router(documents.router)
 app.include_router(annotations.router)
+app.include_router(relations.router)
 app.include_router(search.router)
 app.include_router(structure.router)
 app.include_router(suggestions.router)

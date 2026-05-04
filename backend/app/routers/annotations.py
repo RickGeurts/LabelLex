@@ -21,7 +21,7 @@ Updates:
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
 
 from ..config import settings
@@ -29,6 +29,7 @@ from ..db import get_db
 from ..models import (
     Annotation,
     AnnotationAttribute,
+    AnnotationRelation,
     AttributeDefinition,
     Document,
     LabelDefinition,
@@ -276,6 +277,13 @@ def delete_annotation(annotation_id: int, db: Session = Depends(get_db)) -> None
     if ann is None:
         raise HTTPException(status_code=404, detail="Annotation not found")
     document_id = ann.document_id
+    # SQLite FK enforcement is off; cascade relations explicitly.
+    db.execute(
+        delete(AnnotationRelation).where(
+            (AnnotationRelation.from_annotation_id == annotation_id)
+            | (AnnotationRelation.to_annotation_id == annotation_id)
+        )
+    )
     db.delete(ann)
     touch_document(db, document_id)
     db.commit()

@@ -130,6 +130,45 @@ class DocumentCategoryUpdate(BaseModel):
     color: str | None = None
 
 
+# --- Relation definitions + relations -------------------------------------
+
+class RelationDefinitionOut(_Base):
+    id: int
+    project_id: int
+    name: str
+    description: str | None = None
+    color: str
+    created_at: datetime
+
+
+class RelationDefinitionCreate(BaseModel):
+    name: str
+    description: str | None = None
+    color: str = "#64748b"
+
+
+class RelationDefinitionUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    color: str | None = None
+
+
+class AnnotationRelationOut(_Base):
+    id: int
+    document_id: int
+    from_annotation_id: int
+    to_annotation_id: int
+    relation_def_id: int
+    created_by: int
+    created_at: datetime
+
+
+class AnnotationRelationCreate(BaseModel):
+    from_annotation_id: int
+    to_annotation_id: int
+    relation_def_id: int
+
+
 class WordOut(BaseModel):
     char_start: int
     char_end: int

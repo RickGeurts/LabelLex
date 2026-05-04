@@ -97,6 +97,43 @@ export interface DocumentCategoryUpdate {
   color?: string;
 }
 
+export interface RelationDefinition {
+  id: number;
+  project_id: number;
+  name: string;
+  description: string | null;
+  color: string;
+  created_at: string;
+}
+
+export interface RelationDefinitionCreate {
+  name: string;
+  description?: string | null;
+  color?: string;
+}
+
+export interface RelationDefinitionUpdate {
+  name?: string;
+  description?: string | null;
+  color?: string;
+}
+
+export interface AnnotationRelation {
+  id: number;
+  document_id: number;
+  from_annotation_id: number;
+  to_annotation_id: number;
+  relation_def_id: number;
+  created_by: number;
+  created_at: string;
+}
+
+export interface AnnotationRelationCreate {
+  from_annotation_id: number;
+  to_annotation_id: number;
+  relation_def_id: number;
+}
+
 export interface ProjectCreate {
   name: string;
 }
