@@ -251,6 +251,15 @@ button {
   outline: 2px dashed rgba(15, 23, 42, 0.6);
   opacity: 0.22;
 }
+/* Scope annotations: same primitive but softer fill so clause highlights
+   (rendered after them in DOM order) read clearly on top. */
+.annotation-highlight.scope {
+  opacity: 0.14;
+  border-radius: 0;
+}
+.annotation-highlight.scope.resizing {
+  opacity: 0.1;
+}
 
 /* Drag handles for span resize. Two narrow vertical bars at the start and
    end of the annotation; user drags either to redefine the span. */
@@ -586,6 +595,16 @@ button {
   padding: 1px 6px;
   font-size: 11px;
   color: #475569;
+}
+.scope-pill {
+  background: #ede9fe;
+  color: #5b21b6;
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
 }
 .attr-required {
   background: #fee2e2;

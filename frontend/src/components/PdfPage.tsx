@@ -172,33 +172,66 @@ export default function PdfPage({
     >
       {active && <canvas ref={canvasRef} />}
 
-      {/* Annotation highlights (line-based) — always rendered so navigation
-          feedback shows immediately, even before canvas paints. */}
-      {annotationCoverage.map(({ ann, words }) => {
-        const label = labelById.get(ann.label_definition_id);
-        const color = label?.color ?? "#1d4ed8";
-        const tooltip = describeAnnotation(ann, label, attrDefById);
-        const isResizing = resizingAnnotationId === ann.id;
-        const rects = lineRects(words, page.words, scale);
-        return rects.map((r, i) => (
-          <div
-            key={`ann-${ann.id}-${i}`}
-            className={`annotation-highlight${isResizing ? " resizing" : ""}`}
-            data-annotation-id={i === 0 ? ann.id : undefined}
-            title={tooltip}
-            onClick={(e) => onAnnotationClick(ann, e)}
-            style={{
-              left: r.left,
-              top: r.top,
-              width: r.width,
-              height: r.height,
-              background: color,
-              pointerEvents: annotationsClickable && !isResizing ? "auto" : "none",
-              cursor: annotationsClickable ? "pointer" : "default",
-            }}
-          />
-        ));
-      })}
+      {/* Scope highlights render first so clause highlights stack above them
+          in DOM order. Both classes share .annotation-highlight; the .scope
+          modifier softens fill + drops below clause overlays. */}
+      {annotationCoverage
+        .filter(({ ann }) => labelById.get(ann.label_definition_id)?.is_scope)
+        .map(({ ann, words }) => {
+          const label = labelById.get(ann.label_definition_id);
+          const color = label?.color ?? "#6366f1";
+          const tooltip = describeAnnotation(ann, label, attrDefById);
+          const isResizing = resizingAnnotationId === ann.id;
+          const rects = lineRects(words, page.words, scale);
+          return rects.map((r, i) => (
+            <div
+              key={`scope-${ann.id}-${i}`}
+              className={`annotation-highlight scope${isResizing ? " resizing" : ""}`}
+              data-annotation-id={i === 0 ? ann.id : undefined}
+              title={tooltip}
+              onClick={(e) => onAnnotationClick(ann, e)}
+              style={{
+                left: r.left,
+                top: r.top,
+                width: r.width,
+                height: r.height,
+                background: color,
+                pointerEvents: annotationsClickable && !isResizing ? "auto" : "none",
+                cursor: annotationsClickable ? "pointer" : "default",
+              }}
+            />
+          ));
+        })}
+
+      {/* Clause annotation highlights (line-based) — always rendered so
+          navigation feedback shows immediately, even before canvas paints. */}
+      {annotationCoverage
+        .filter(({ ann }) => !labelById.get(ann.label_definition_id)?.is_scope)
+        .map(({ ann, words }) => {
+          const label = labelById.get(ann.label_definition_id);
+          const color = label?.color ?? "#1d4ed8";
+          const tooltip = describeAnnotation(ann, label, attrDefById);
+          const isResizing = resizingAnnotationId === ann.id;
+          const rects = lineRects(words, page.words, scale);
+          return rects.map((r, i) => (
+            <div
+              key={`ann-${ann.id}-${i}`}
+              className={`annotation-highlight${isResizing ? " resizing" : ""}`}
+              data-annotation-id={i === 0 ? ann.id : undefined}
+              title={tooltip}
+              onClick={(e) => onAnnotationClick(ann, e)}
+              style={{
+                left: r.left,
+                top: r.top,
+                width: r.width,
+                height: r.height,
+                background: color,
+                pointerEvents: annotationsClickable && !isResizing ? "auto" : "none",
+                cursor: annotationsClickable ? "pointer" : "default",
+              }}
+            />
+          ));
+        })}
 
       {/* Active selection highlight (yellow, line-based). */}
       {selectionWords.length > 0 &&

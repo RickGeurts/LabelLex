@@ -78,3 +78,15 @@ def run_lightweight_migrations() -> None:
             conn.execute(
                 text("ALTER TABLE documents ADD COLUMN category_id INTEGER")
             )
+
+        label_cols = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(label_definitions)"))
+        }
+        if "is_scope" not in label_cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE label_definitions ADD COLUMN is_scope BOOLEAN "
+                    "NOT NULL DEFAULT 0"
+                )
+            )

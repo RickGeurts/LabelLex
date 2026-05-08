@@ -165,7 +165,13 @@ _V0_DESCRIPTIONS: dict[str, str] = {
 
 
 def seed(db: Session) -> None:
-    """Idempotent — safe to call on every startup."""
+    """Bootstrap default user + project. Starter ontology (labels, relation
+    types, attributes) is seeded ONLY when the default project doesn't yet
+    exist. On every subsequent startup we run only the description-upgrader,
+    which edits existing labels' descriptions in place but never creates new
+    rows — so user deletions in the labels/relations/attributes admin stick
+    across restarts.
+    """
     user = db.scalar(select(User).where(User.id == settings.default_user_id))
     if user is None:
         user = User(id=settings.default_user_id, email="rick@labellex.local", name="Rick")
@@ -173,6 +179,7 @@ def seed(db: Session) -> None:
         db.flush()
 
     project = db.scalar(select(Project).where(Project.id == settings.default_project_id))
+    is_first_run = project is None
     if project is None:
         project = Project(
             id=settings.default_project_id,
@@ -183,69 +190,60 @@ def seed(db: Session) -> None:
         db.flush()
 
     by_name: dict[str, LabelDefinition] = {l.name: l for l in project.labels}
-    # Two-pass: create in order, resolving parent_name → id from previously-created rows.
     new_desc_by_name = {name: desc for name, _, desc, _ in STARTER_LABELS}
-    for name, color, desc, parent_name in STARTER_LABELS:
-        if name in by_name:
-            # Description-only upgrade: if the stored description still matches
-            # the v0 boilerplate exactly, replace it with the richer copy. Any
-            # user edit (even a typo fix) deviates from the literal and is
-            # preserved.
-            existing = by_name[name]
-            v0_desc = _V0_DESCRIPTIONS.get(name)
-            if v0_desc is not None and existing.description == v0_desc:
-                existing.description = new_desc_by_name[name]
-            continue
-        parent_id = by_name[parent_name].id if parent_name else None
-        label = LabelDefinition(
-            project_id=project.id,
-            parent_id=parent_id,
-            name=name,
-            color=color,
-            description=desc,
-        )
-        db.add(label)
-        db.flush()
-        by_name[name] = label
 
-    # Relation definitions — idempotent create-if-missing.
-    existing_rel_names = {
-        rd.name
-        for rd in db.scalars(
-            select(RelationDefinition).where(
-                RelationDefinition.project_id == project.id
-            )
-        ).all()
-    }
-    for rel_name, rel_color, rel_desc in STARTER_RELATION_DEFS:
-        if rel_name in existing_rel_names:
+    # Description-upgrader — always runs. Replaces a stored description only
+    # when it still matches the v0 boilerplate exactly, so any admin edit
+    # (even a typo fix) deviates from the literal and is preserved.
+    for name in list(by_name.keys()):
+        v0_desc = _V0_DESCRIPTIONS.get(name)
+        new_desc = new_desc_by_name.get(name)
+        if v0_desc is None or new_desc is None:
             continue
-        db.add(
-            RelationDefinition(
+        existing = by_name[name]
+        if existing.description == v0_desc:
+            existing.description = new_desc
+
+    if is_first_run:
+        # Brand-new project: populate the starter ontology once.
+        for name, color, desc, parent_name in STARTER_LABELS:
+            if name in by_name:
+                continue
+            parent_id = by_name[parent_name].id if parent_name else None
+            label = LabelDefinition(
                 project_id=project.id,
-                name=rel_name,
-                color=rel_color,
-                description=rel_desc,
+                parent_id=parent_id,
+                name=name,
+                color=color,
+                description=desc,
             )
-        )
+            db.add(label)
+            db.flush()
+            by_name[name] = label
 
-    # Attributes — only seed if the label exists and doesn't already have the attribute.
-    for label_name, attr_name, vtype, enum_values, required, attr_desc in STARTER_ATTRIBUTES:
-        label = by_name.get(label_name)
-        if label is None:
-            continue
-        existing = {a.name for a in label.attributes}
-        if attr_name in existing:
-            continue
-        db.add(
-            AttributeDefinition(
-                label_id=label.id,
-                name=attr_name,
-                value_type=vtype,
-                enum_values=enum_values,
-                required=required,
-                description=attr_desc,
+        for rel_name, rel_color, rel_desc in STARTER_RELATION_DEFS:
+            db.add(
+                RelationDefinition(
+                    project_id=project.id,
+                    name=rel_name,
+                    color=rel_color,
+                    description=rel_desc,
+                )
             )
-        )
+
+        for label_name, attr_name, vtype, enum_values, required, attr_desc in STARTER_ATTRIBUTES:
+            label = by_name.get(label_name)
+            if label is None:
+                continue
+            db.add(
+                AttributeDefinition(
+                    label_id=label.id,
+                    name=attr_name,
+                    value_type=vtype,
+                    enum_values=enum_values,
+                    required=required,
+                    description=attr_desc,
+                )
+            )
 
     db.commit()

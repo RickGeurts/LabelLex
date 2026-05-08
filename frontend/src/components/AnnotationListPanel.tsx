@@ -13,6 +13,28 @@ interface Props {
   onDelete: (annotationId: number) => void;
 }
 
+// Span containment used by the "inside scopes only" filter. A clause
+// annotation is "inside" a scope iff every position in its span lies within
+// the scope's span. Scope annotations themselves are always shown when the
+// filter is on so the user keeps the structural context.
+function isInsideAnyScope(
+  ann: Annotation,
+  scopes: Annotation[],
+): boolean {
+  for (const s of scopes) {
+    if (s.id === ann.id) continue;
+    const startsAfter =
+      s.start_page_num < ann.start_page_num ||
+      (s.start_page_num === ann.start_page_num &&
+        s.start_char <= ann.start_char);
+    const endsBefore =
+      s.end_page_num > ann.end_page_num ||
+      (s.end_page_num === ann.end_page_num && s.end_char >= ann.end_char);
+    if (startsAfter && endsBefore) return true;
+  }
+  return false;
+}
+
 export default function AnnotationListPanel({
   annotations,
   labels,
@@ -24,6 +46,7 @@ export default function AnnotationListPanel({
   const [filterLabel, setFilterLabel] = useState<number | "all">("all");
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<SortMode>("page");
+  const [insideScopesOnly, setInsideScopesOnly] = useState(false);
 
   const labelById = useMemo(
     () => new Map(labels.map((l) => [l.id, l])),
@@ -35,11 +58,24 @@ export default function AnnotationListPanel({
     return m;
   }, [labels]);
 
+  const scopeAnnotations = useMemo(
+    () =>
+      annotations.filter(
+        (a) => labelById.get(a.label_definition_id)?.is_scope,
+      ),
+    [annotations, labelById],
+  );
+  const hasScopes = scopeAnnotations.length > 0;
+
   const items = useMemo(() => {
     const lower = search.trim().toLowerCase();
     let xs = annotations.filter((a) => {
       if (filterLabel !== "all" && a.label_definition_id !== filterLabel) return false;
       if (lower && !a.text.toLowerCase().includes(lower)) return false;
+      if (insideScopesOnly && hasScopes) {
+        const isScope = labelById.get(a.label_definition_id)?.is_scope;
+        if (!isScope && !isInsideAnyScope(a, scopeAnnotations)) return false;
+      }
       return true;
     });
     xs = [...xs].sort((a, b) => {
@@ -57,7 +93,16 @@ export default function AnnotationListPanel({
       return b.created_at.localeCompare(a.created_at);
     });
     return xs;
-  }, [annotations, filterLabel, search, sort, labelById]);
+  }, [
+    annotations,
+    filterLabel,
+    search,
+    sort,
+    labelById,
+    insideScopesOnly,
+    hasScopes,
+    scopeAnnotations,
+  ]);
 
   const formatAttrs = (a: Annotation): string => {
     if (a.attributes.length === 0) return "";
@@ -109,6 +154,24 @@ export default function AnnotationListPanel({
               <option value="newest">Newest</option>
             </select>
           </div>
+          {hasScopes && (
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
+                fontSize: 12,
+                color: "#475569",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={insideScopesOnly}
+                onChange={(e) => setInsideScopesOnly(e.target.checked)}
+              />
+              Inside scopes only
+            </label>
+          )}
         </div>
       </header>
 

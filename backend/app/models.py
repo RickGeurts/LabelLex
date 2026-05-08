@@ -65,6 +65,11 @@ class LabelDefinition(Base):
     name: Mapped[str] = mapped_column(String(255))
     color: Mapped[str] = mapped_column(String(16), default="#3b82f6")
     description: Mapped[str | None] = mapped_column(Text(), nullable=True)
+    # Scope labels mark "this region is in-play"; clause labels (the default)
+    # carry the actual factual labelling. Annotations of either kind share the
+    # same span/edit/delete machinery — only rendering and the panel filter
+    # treat them differently.
+    is_scope: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     project: Mapped[Project] = relationship(back_populates="labels")

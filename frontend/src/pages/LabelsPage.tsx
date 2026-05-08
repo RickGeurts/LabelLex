@@ -90,6 +90,7 @@ interface CreateFormState {
   name: string;
   color: string;
   description: string;
+  is_scope: boolean;
 }
 
 interface InlineRenameState {
@@ -152,6 +153,7 @@ export default function LabelsPage() {
       name: "",
       color: DEFAULT_COLOR,
       description: "",
+      is_scope: false,
     });
 
   const submitCreate = async () => {
@@ -163,6 +165,7 @@ export default function LabelsPage() {
         color: createForm.color,
         description: createForm.description.trim() || null,
         parent_id: createForm.parent_id,
+        is_scope: createForm.is_scope,
       };
       await api.createLabel(projectId, payload);
       setCreateForm(null);
@@ -454,6 +457,14 @@ function LabelTreeRow({
             {l.attributes.length} attr
           </span>
         )}
+        {l.is_scope && (
+          <span
+            className="scope-pill"
+            title="Scope label — marks regions of the document that are in-play for review"
+          >
+            scope
+          </span>
+        )}
         {l.description && (
           <span style={{ color: "#64748b", fontSize: 12, marginLeft: 8 }}>
             {l.description}
@@ -550,6 +561,20 @@ function CreateLabelForm({
           value={form.description}
           onChange={(e) => onChange({ ...form, description: e.target.value })}
         />
+        <label>Scope label</label>
+        <label
+          style={{ display: "flex", alignItems: "center", gap: 6, fontWeight: 400 }}
+        >
+          <input
+            type="checkbox"
+            checked={form.is_scope}
+            onChange={(e) => onChange({ ...form, is_scope: e.target.checked })}
+          />
+          <span style={{ color: "#64748b", fontSize: 12 }}>
+            Marks regions that are in-play for review. Renders as a soft
+            background fill; clause labels stack on top.
+          </span>
+        </label>
       </div>
       <div style={formActionsStyle}>
         <button className="btn ghost" onClick={onCancel}>Cancel</button>
@@ -629,6 +654,7 @@ function EditLabelModal({
   const [color, setColor] = useState(label.color);
   const [description, setDescription] = useState(label.description ?? "");
   const [parentId, setParentId] = useState<number | null>(label.parent_id);
+  const [isScope, setIsScope] = useState(label.is_scope);
   const [labelDirty, setLabelDirty] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [attrForm, setAttrForm] = useState<AttrFormState | null>(null);
@@ -638,8 +664,16 @@ function EditLabelModal({
     setColor(label.color);
     setDescription(label.description ?? "");
     setParentId(label.parent_id);
+    setIsScope(label.is_scope);
     setLabelDirty(false);
-  }, [label.id, label.name, label.color, label.description, label.parent_id]);
+  }, [
+    label.id,
+    label.name,
+    label.color,
+    label.description,
+    label.parent_id,
+    label.is_scope,
+  ]);
 
   const descendantIds = useMemo(() => {
     const out = new Set<number>([label.id]);
@@ -684,6 +718,7 @@ function EditLabelModal({
         color,
         description: description.trim() || null,
         parent_id: parentId,
+        is_scope: isScope,
       };
       await api.updateLabel(label.project_id, label.id, payload);
       setLabelDirty(false);
@@ -818,6 +853,28 @@ function EditLabelModal({
               setLabelDirty(true);
             }}
           />
+          <label>Scope label</label>
+          <label
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              fontWeight: 400,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={isScope}
+              onChange={(e) => {
+                setIsScope(e.target.checked);
+                setLabelDirty(true);
+              }}
+            />
+            <span style={{ color: "#64748b", fontSize: 12 }}>
+              Marks regions that are in-play for review. Renders as a soft
+              background fill; clause labels stack on top.
+            </span>
+          </label>
         </div>
         <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10 }}>
           <button

@@ -33,6 +33,7 @@ export interface Label {
   name: string;
   color: string;
   description: string | null;
+  is_scope: boolean;
   attributes: AttributeDefinition[];
   annotation_count: number;
 }
@@ -42,6 +43,7 @@ export interface LabelCreate {
   color?: string;
   description?: string | null;
   parent_id?: number | null;
+  is_scope?: boolean;
 }
 
 export interface LabelUpdate {
@@ -49,6 +51,7 @@ export interface LabelUpdate {
   color?: string;
   description?: string | null;
   parent_id?: number | null;
+  is_scope?: boolean;
 }
 
 export interface Project {

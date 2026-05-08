@@ -1923,6 +1923,11 @@ function LabelPickerTree({
         <span style={{ fontWeight: n.children.length > 0 ? 600 : 400 }}>
           {n.label.name}
         </span>
+        {n.label.is_scope && (
+          <span className="scope-pill" style={{ marginLeft: 6 }}>
+            scope
+          </span>
+        )}
       </button>
       {n.children.map((c) => renderNode(c, depth + 1))}
     </div>

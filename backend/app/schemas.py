@@ -52,6 +52,7 @@ class LabelOut(_Base):
     name: str
     color: str
     description: str | None = None
+    is_scope: bool = False
     attributes: list[AttributeOut] = Field(default_factory=list)
     annotation_count: int = 0
 
@@ -61,6 +62,7 @@ class LabelCreate(BaseModel):
     color: str = "#3b82f6"
     description: str | None = None
     parent_id: int | None = None
+    is_scope: bool = False
 
 
 class LabelUpdate(BaseModel):
@@ -68,6 +70,7 @@ class LabelUpdate(BaseModel):
     color: str | None = None
     description: str | None = None
     parent_id: int | None = None
+    is_scope: bool | None = None
 
 
 # --- Projects --------------------------------------------------------------

@@ -63,6 +63,7 @@ def create_label(
         name=payload.name,
         color=payload.color,
         description=payload.description,
+        is_scope=payload.is_scope,
     )
     db.add(label)
     try:
@@ -95,6 +96,8 @@ def update_label(
         label.color = data["color"]
     if "description" in data:
         label.description = data["description"]
+    if "is_scope" in data and data["is_scope"] is not None:
+        label.is_scope = data["is_scope"]
 
     try:
         db.commit()
