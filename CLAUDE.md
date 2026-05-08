@@ -51,6 +51,9 @@ backend/
                        /api/documents/:id/prelabel  (NDJSON stream),
                        /api/documents/:id/suggestions,
                        /api/suggestions/:id/accept|reject
+      relations.py     /api/projects/:id/relation-defs (CRUD),
+                       /api/relations (CRUD),
+                       /api/documents/:id/relations (list)
   scripts/
     parse_pdf.py       Standalone parser test harness (run on a fixture PDF)
 
@@ -310,7 +313,21 @@ These are load-bearing decisions; check before reworking.
   `/projects/:id/settings` (name, description, color preset). Inline
   picker on the documents table assigns/changes per row, persisting via
   `PATCH /api/documents/:id`.
-- ⬜ Inter-annotation relations.
+- ✅ Inter-annotation relations. Two tables: `RelationDefinition`
+  (admin-authored type per project) and `AnnotationRelation` (directed
+  link between two annotations on the **same** document). Same-document,
+  no-self-loops, unique-(from, to, type) all enforced in
+  `routers/relations.py`. Annotation delete wipes its relations
+  explicitly (SQLite FK enforcement is off on this engine). Endpoints:
+  `/api/projects/:id/relation-defs` CRUD, `/api/relations` CRUD,
+  `/api/documents/:id/relations` list. `/projects/:id/settings` is
+  refactored around a generic `TaxonomySection` component composing the
+  categories card and the new relation-types card. Document viewer:
+  editor popover gains a Relations section (outgoing + incoming) with
+  a clickable target snippet that jumps + scrolls, and an × to remove.
+  "+ Link" toolbar button enters linking mode (top banner explains the
+  flow, word-dragging suppressed) — clicking another annotation opens a
+  relation-type picker at the click position. Esc cancels.
 - ⬜ Multi-user (auth, sessions, roles, per-document checkout). Projects
   exist but everything still attributes to `settings.default_user_id`.
 - ⬜ Postgres + docker-compose.
@@ -340,13 +357,25 @@ These are load-bearing decisions; check before reworking.
     180). Set up Ollama with: install (`winget install Ollama.Ollama`),
     pull the model (`ollama pull qwen2.5:14b-instruct`), and the daemon
     auto-starts on Windows.
-- ✅ Ollama: pre-labelling clauses for MREL features (clause discovery v0).
+- ✅ Ollama: pre-labelling clauses for MREL features (clause discovery v1).
   - `app/services/clause_discovery.py` — per-page Ollama call with a JSON
     schema constraining the response to `{candidates: [{label, quote}]}`,
     where `label` is enum-bound to the names of the labels in scope. Each
     returned quote is re-anchored to the page's text via exact substring
-    match (with a whitespace-tolerant fallback because pages have hard
-    line breaks the model often normalises).
+    match → whitespace-tolerant fallback (pages have hard line breaks
+    the model often normalises) → fuzzy head-and-tail anchor that
+    recovers candidates the model paraphrased in the middle.
+    Punctuation-trim + lowercase comparison absorbs small wrappings
+    (smart quotes, trailing periods).
+  - System prompt is explicit about **what counts as a clause** and
+    **what to skip** (headings, definitions, Risk-Factor /
+    Use-of-Proceeds / Taxation boilerplate, cover-page summary tables)
+    — empirically the biggest source of false positives.
+  - Seeded MREL labels in the default project carry richer descriptions
+    referencing concrete legal markers (rank pari passu, Article 108
+    BRRD, etc.) and explicit negatives. The seed upgrader replaces v0
+    stub descriptions only when the stored description still matches
+    the v0 literal — admin edits are preserved.
   - `POST /api/documents/{id}/prelabel` is a **streaming NDJSON endpoint**.
     Body `{start_page_num, end_page_num, label_definition_ids?}`. Yields
     one event per line:
