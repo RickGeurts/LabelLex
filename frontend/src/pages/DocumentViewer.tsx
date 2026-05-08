@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -1733,16 +1734,11 @@ export default function DocumentViewer() {
 
       {/* Relation-type picker (rendered while linkingMode.picker is set) */}
       {linkingMode?.picker && (
-        <div
-          className="label-picker"
-          style={{
-            position: "fixed",
-            left: linkingMode.picker.x,
-            top: linkingMode.picker.y,
-          }}
-          onClick={(e) => e.stopPropagation()}
+        <DraggablePopover
+          initialX={linkingMode.picker.x}
+          initialY={linkingMode.picker.y}
         >
-          <div className="picker-title">Relation type</div>
+          <div className="picker-title" data-drag-handle>Relation type</div>
           {relationDefs.length === 0 ? (
             <div
               style={{ padding: "6px 8px", fontSize: 12, color: "#94a3b8" }}
@@ -1768,17 +1764,13 @@ export default function DocumentViewer() {
           <button className="picker-cancel" onClick={cancelLinking}>
             cancel
           </button>
-        </div>
+        </DraggablePopover>
       )}
 
       {/* Span-resize confirmation popup */}
       {spanConfirm && (
-        <div
-          className="label-picker"
-          style={{ position: "fixed", left: spanConfirm.x, top: spanConfirm.y }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="picker-title">Apply new span?</div>
+        <DraggablePopover initialX={spanConfirm.x} initialY={spanConfirm.y}>
+          <div className="picker-title" data-drag-handle>Apply new span?</div>
           <div style={{ padding: "0 8px 8px 8px", fontSize: 12, color: "#475569" }}>
             {spanConfirm.newStart.page === spanConfirm.newEnd.page
               ? `Page ${spanConfirm.newStart.page}`
@@ -1792,7 +1784,7 @@ export default function DocumentViewer() {
               apply
             </button>
           </div>
-        </div>
+        </DraggablePopover>
       )}
 
       {/* Popover (picker / editor) */}
@@ -1901,6 +1893,83 @@ function buildLabelTree(labels: Label[]): LabelNode[] {
       children: build(label.id),
     }));
   return build(null);
+}
+
+// Fixed-position popover that (a) auto-clamps into the viewport when first
+// rendered so the box can't open partly off-screen, and (b) is draggable by
+// any element marked with `data-drag-handle`.
+function DraggablePopover({
+  initialX,
+  initialY,
+  children,
+}: {
+  initialX: number;
+  initialY: number;
+  children: React.ReactNode;
+}) {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const [pos, setPos] = useState({ x: initialX, y: initialY });
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const margin = 8;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let x = initialX;
+    let y = initialY;
+    if (x + rect.width + margin > vw) x = vw - rect.width - margin;
+    if (y + rect.height + margin > vh) y = vh - rect.height - margin;
+    if (x < margin) x = margin;
+    if (y < margin) y = margin;
+    if (x !== initialX || y !== initialY) setPos({ x, y });
+    // Run once at mount; the clamp is based on the initial open position.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (!target.closest("[data-drag-handle]")) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const origX = pos.x;
+    const origY = pos.y;
+    const onMove = (ev: PointerEvent) => {
+      const el = ref.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const margin = 8;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      let nx = origX + (ev.clientX - startX);
+      let ny = origY + (ev.clientY - startY);
+      if (nx + rect.width + margin > vw) nx = vw - rect.width - margin;
+      if (ny + rect.height + margin > vh) ny = vh - rect.height - margin;
+      if (nx < margin) nx = margin;
+      if (ny < margin) ny = margin;
+      setPos({ x: nx, y: ny });
+    };
+    const onUp = () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  };
+
+  return (
+    <div
+      ref={ref}
+      className="label-picker"
+      style={{ position: "fixed", left: pos.x, top: pos.y }}
+      onClick={(e) => e.stopPropagation()}
+      onPointerDown={onPointerDown}
+    >
+      {children}
+    </div>
+  );
 }
 
 function LabelPickerTree({
@@ -2133,16 +2202,13 @@ function PopoverShell({
   onDeleteRelation: (id: number) => void;
   onJumpToAnnotation: (pageNum: number, annotationId: number) => void;
 }) {
-  // Position is fixed in the viewport (not inside any scrolling page).
-  const style: React.CSSProperties = { left: popover.x, top: popover.y, position: "fixed" };
-
   if (popover.kind === "picker-label") {
     return (
-      <div className="label-picker" style={style} onClick={(e) => e.stopPropagation()}>
-        <div className="picker-title">Apply label</div>
+      <DraggablePopover initialX={popover.x} initialY={popover.y}>
+        <div className="picker-title" data-drag-handle>Apply label</div>
         <LabelPickerTree labels={labels} onPick={onPickLabel} />
         <button className="picker-cancel" onClick={onCancel}>cancel</button>
-      </div>
+      </DraggablePopover>
     );
   }
 
@@ -2154,8 +2220,8 @@ function PopoverShell({
       (a) => a.required && !isValueFilled(popover.values[a.id], a.value_type),
     );
     return (
-      <div className="label-picker" style={style} onClick={(e) => e.stopPropagation()}>
-        <div className="picker-title">
+      <DraggablePopover initialX={popover.x} initialY={popover.y}>
+        <div className="picker-title" data-drag-handle>
           <span className="label-swatch" style={{ background: label.color, marginRight: 6 }} />
           {label.name}
         </div>
@@ -2180,7 +2246,7 @@ function PopoverShell({
             </button>
           </div>
         </div>
-      </div>
+      </DraggablePopover>
     );
   }
 
@@ -2197,8 +2263,8 @@ function PopoverShell({
     ann.text.length > 80 ? ann.text.slice(0, 77) + "…" : ann.text;
   void attrDefById;
   return (
-    <div className="label-picker" style={style} onClick={(e) => e.stopPropagation()}>
-      <div className="picker-title">
+    <DraggablePopover initialX={popover.x} initialY={popover.y}>
+      <div className="picker-title" data-drag-handle>
         <span className="label-swatch" style={{ background: label.color, marginRight: 6 }} />
         {label.name}
         <span
@@ -2252,7 +2318,7 @@ function PopoverShell({
           </button>
         </div>
       </div>
-    </div>
+    </DraggablePopover>
   );
 }
 

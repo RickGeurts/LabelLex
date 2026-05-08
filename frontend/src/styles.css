@@ -446,6 +446,10 @@ button {
   color: #64748b;
   padding: 4px 6px 8px 6px;
 }
+.label-picker .picker-title[data-drag-handle] {
+  cursor: move;
+  user-select: none;
+}
 .label-picker button.label-row {
   display: flex;
   align-items: center;
