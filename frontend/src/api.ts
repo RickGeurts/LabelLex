@@ -77,6 +77,8 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
+  deleteDocument: (id: number) =>
+    jsonRequest<void>(`/api/documents/${id}`, { method: "DELETE" }),
 
   listCategories: (projectId: number) =>
     jsonRequest<DocumentCategory[]>(

@@ -4,12 +4,19 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db
-from ..models import Document, DocumentCategory, Page, Project
+from ..models import (
+    AnnotationRelation,
+    AnnotationSuggestion,
+    Document,
+    DocumentCategory,
+    Page,
+    Project,
+)
 from ..schemas import DocumentOut, DocumentUpdate, PageOut
 from ..services import storage
 from ..services.document_activity import attach_annotation_counts
@@ -127,6 +134,29 @@ def update_document(
     db.refresh(doc)
     attach_annotation_counts(db, [doc])
     return doc
+
+
+@router.delete("/documents/{document_id}", status_code=204)
+def delete_document(document_id: int, db: Session = Depends(get_db)) -> None:
+    doc = db.get(Document, document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    # SQLite FK enforcement is off; cascade tables without a SQLAlchemy
+    # relationship explicitly. Pages, Annotations, and Annotation.attributes
+    # cascade via relationship config when the Document is deleted.
+    db.execute(
+        delete(AnnotationRelation).where(
+            AnnotationRelation.document_id == document_id
+        )
+    )
+    db.execute(
+        delete(AnnotationSuggestion).where(
+            AnnotationSuggestion.document_id == document_id
+        )
+    )
+    db.delete(doc)
+    db.commit()
+    storage.delete_upload(document_id)
 
 
 @router.get("/documents/{document_id}/pdf")

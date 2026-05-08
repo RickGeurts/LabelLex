@@ -76,6 +76,26 @@ export default function ProjectPage() {
     }
   };
 
+  const onDeleteDocument = async (doc: Document) => {
+    const annPart =
+      doc.annotation_count > 0
+        ? ` and ${doc.annotation_count} annotation${doc.annotation_count === 1 ? "" : "s"}`
+        : "";
+    if (
+      !confirm(
+        `Delete "${doc.filename}"? This permanently removes the PDF${annPart}.`,
+      )
+    )
+      return;
+    setError(null);
+    try {
+      await api.deleteDocument(doc.id);
+      setDocs((prev) => (prev ? prev.filter((d) => d.id !== doc.id) : prev));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   // Sequential upload: pymupdf parsing is CPU-bound, parallel uploads only
   // hurt. Each file flips through queued → uploading → done|failed; the
   // table refreshes after the run so the user sees the new rows.
@@ -355,6 +375,12 @@ export default function ProjectPage() {
                       >
                         <button className="btn ghost btn-xs">Open</button>
                       </Link>
+                      <button
+                        className="btn ghost btn-xs"
+                        onClick={() => onDeleteDocument(d)}
+                      >
+                        Delete
+                      </button>
                     </td>
                   </tr>
                 );

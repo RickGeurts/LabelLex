@@ -26,3 +26,9 @@ def save_upload(document_id: int, source: BinaryIO) -> Path:
 
 def upload_path(document_id: int) -> Path:
     return _uploads_dir() / f"{document_id}.pdf"
+
+
+def delete_upload(document_id: int) -> None:
+    target = upload_path(document_id)
+    if target.exists():
+        target.unlink()
