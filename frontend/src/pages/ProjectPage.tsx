@@ -196,6 +196,34 @@ export default function ProjectPage() {
     (u) => u.status === "done" || u.status === "failed",
   );
 
+  const [publishing, setPublishing] = useState(false);
+  const [publishMessage, setPublishMessage] = useState<{
+    tone: "ok" | "err";
+    text: string;
+  } | null>(null);
+
+  const totalAnnotations = useMemo(
+    () => (docs ?? []).reduce((sum, d) => sum + (d.annotation_count ?? 0), 0),
+    [docs],
+  );
+
+  const onPublishToLoraForge = async () => {
+    if (!Number.isFinite(projectId)) return;
+    setPublishing(true);
+    setPublishMessage(null);
+    try {
+      const result = await api.publishToLoraForge(projectId);
+      setPublishMessage({
+        tone: "ok",
+        text: `Published ${result.summary.documentsWithLabels}/${result.summary.totalDocuments} document(s) and ${result.summary.annotations} annotation(s) → LoRA Forge dataset ${result.dataset.id} (${result.dataset.rowCount} row${result.dataset.rowCount === 1 ? "" : "s"}).`,
+      });
+    } catch (e) {
+      setPublishMessage({ tone: "err", text: String(e) });
+    } finally {
+      setPublishing(false);
+    }
+  };
+
   return (
     <>
       <div
@@ -273,7 +301,39 @@ export default function ProjectPage() {
             {docs?.length ?? 0} document
             {(docs?.length ?? 0) === 1 ? "" : "s"}
           </span>
+          <button
+            className="btn btn-xs"
+            onClick={onPublishToLoraForge}
+            disabled={publishing || !docs || totalAnnotations === 0}
+            title={
+              totalAnnotations === 0
+                ? "Label at least one annotation before publishing"
+                : "Send all labelled documents to the local LoRA Forge instance as a Dataset"
+            }
+            style={{ marginLeft: 8 }}
+          >
+            {publishing ? "Publishing…" : "Publish to LoRA Forge"}
+          </button>
         </div>
+        {publishMessage && (
+          <div
+            className={publishMessage.tone === "err" ? "error-banner" : ""}
+            style={
+              publishMessage.tone === "ok"
+                ? {
+                    marginBottom: 8,
+                    padding: "8px 12px",
+                    borderRadius: 6,
+                    background: "#064e3b",
+                    color: "#d1fae5",
+                    fontSize: 13,
+                  }
+                : { marginBottom: 8 }
+            }
+          >
+            {publishMessage.text}
+          </div>
+        )}
         {docs === null ? (
           <div className="empty-state">Loading…</div>
         ) : docs.length === 0 ? (

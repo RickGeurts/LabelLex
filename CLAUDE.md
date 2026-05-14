@@ -23,7 +23,7 @@ backend/
   pyproject.toml
   app/
     main.py            FastAPI entrypoint (lifespan: create_all + migrations + seed)
-    config.py          Settings (DB url, storage dir, default user/project, Ollama)
+    config.py          Settings (DB url, storage dir, default user/project, Ollama, LoRA Forge)
     db.py              Engine, SessionLocal, Base, get_db, lightweight ALTER-TABLE shim
     models.py          ORM models
     schemas.py         Pydantic request/response models
@@ -54,6 +54,8 @@ backend/
       relations.py     /api/projects/:id/relation-defs (CRUD),
                        /api/relations (CRUD),
                        /api/documents/:id/relations (list)
+      publish.py       /api/projects/:id/publish-to-lora-forge
+                       (POST: bundle docs+annotations → sibling LoRA Forge)
   scripts/
     parse_pdf.py       Standalone parser test harness (run on a fixture PDF)
 
@@ -328,6 +330,27 @@ These are load-bearing decisions; check before reworking.
   "+ Link" toolbar button enters linking mode (top banner explains the
   flow, word-dragging suppressed) — clicking another annotation opens a
   relation-type picker at the click position. Esc cancels.
+- ✅ Publish to sibling **LoRA Forge** instance (`routers/publish.py`).
+  `POST /api/projects/:id/publish-to-lora-forge` bundles every document
+  in the project — full page-joined text plus `{label, text, startPage,
+  endPage, attributes{name:value}}` per annotation — and POSTs the
+  payload (`{source:"labellex", schemaVersion:1, project, exportedAt,
+  taskType:"clause_extractor", documents}`) to LoRA Forge's webhook.
+  Returns LoRA Forge's dataset response plus a summary
+  (`totalDocuments`, `documentsWithLabels`, `annotations`) for the UI.
+  `httpx.RequestError` → 502 with a hint pointing at
+  `LABELLEX_LORA_FORGE_WEBHOOK_URL`; any 4xx/5xx from LoRA Forge → 502
+  with the upstream body (truncated to 500 chars). Documents with zero
+  annotations are still included in the payload so LoRA Forge can report
+  coverage gaps. Frontend: "Publish to LoRA Forge" button on
+  `/projects/:id` next to the document count, disabled until ≥1
+  annotation exists; success renders a green banner with the new
+  dataset id and row count, failure renders `error-banner`.
+  Settings: `LABELLEX_LORA_FORGE_WEBHOOK_URL` (default
+  `http://127.0.0.1:8001/datasets/labellex-webhook`),
+  `LABELLEX_LORA_FORGE_TIMEOUT_SECONDS` (default 30). The webhook
+  contract is one-way and idempotent on the LoRA Forge side —
+  re-publishing the same project replaces the previous dataset row.
 - ⬜ Multi-user (auth, sessions, roles, per-document checkout). Projects
   exist but everything still attributes to `settings.default_user_id`.
 - ⬜ Postgres + docker-compose.

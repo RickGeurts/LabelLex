@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     ollama_model: str = "qwen2.5:14b-instruct"
     ollama_timeout_seconds: float = 180.0
 
+    # Sibling LoRA Forge instance. The publish endpoint POSTs the project's
+    # labelled documents here when the user clicks "Publish to LoRA Forge".
+    # Override with LABELLEX_LORA_FORGE_WEBHOOK_URL when LoRA Forge runs
+    # somewhere other than the default local port.
+    lora_forge_webhook_url: str = (
+        "http://127.0.0.1:8001/datasets/labellex-webhook"
+    )
+    lora_forge_timeout_seconds: float = 30.0
+
 
 settings = Settings()
 settings.storage_dir.mkdir(parents=True, exist_ok=True)

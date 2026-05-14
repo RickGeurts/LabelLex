@@ -19,6 +19,7 @@ from .routers import (
     documents,
     labels,
     projects,
+    publish,
     relations,
     search,
     structure,
@@ -56,6 +57,7 @@ app.include_router(relations.router)
 app.include_router(search.router)
 app.include_router(structure.router)
 app.include_router(suggestions.router)
+app.include_router(publish.router)
 
 
 @app.get("/api/health", tags=["meta"])

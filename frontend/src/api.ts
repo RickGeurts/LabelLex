@@ -235,4 +235,15 @@ export const api = {
     }
     return res.json();
   },
+  publishToLoraForge: (projectId: number) =>
+    jsonRequest<{
+      ok: boolean;
+      loraForgeUrl: string;
+      dataset: { id: string; name: string; rowCount: number };
+      summary: {
+        totalDocuments: number;
+        documentsWithLabels: number;
+        annotations: number;
+      };
+    }>(`/api/projects/${projectId}/publish-to-lora-forge`, { method: "POST" }),
 };
