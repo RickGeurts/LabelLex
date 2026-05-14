@@ -35,8 +35,10 @@ import AnnotationListPanel from "../components/AnnotationListPanel";
 import {
   CrossPageRange,
   Endpoint,
+  displayLabelName,
   effectiveAttributes,
   isValueFilled,
+  labelChipParts,
   orderEndpoints,
   pageSelectionSlice,
 } from "../utils/spans";
@@ -82,6 +84,14 @@ type PopoverState =
       suggestionId: number | null;
       suggesting: boolean;
       suggestError: string | null;
+      x: number;
+      y: number;
+    }
+  | {
+      // Read-only popover: shows the full annotated text for the given
+      // annotation. Opened by double-clicking an annotation overlay.
+      kind: "text";
+      annotationId: number;
       x: number;
       y: number;
     };
@@ -625,6 +635,67 @@ export default function DocumentViewer() {
     setResizingAnnotationId(null);
   };
 
+  // ---------- Fold child labels into their parent --------------------------
+  // Lets the user collapse `Sub-paragraph` (and its `Sub-sub-paragraph`
+  // descendants) into the parent `Clause` overlay to declutter the PDF.
+  // Stored as the set of "folded parent" label IDs; descendants are
+  // hidden everywhere annotations are rendered.
+  const [foldedParentIds, setFoldedParentIds] = useState<Set<number>>(() => {
+    try {
+      const raw = localStorage.getItem("labellex.viewer.foldedLabels");
+      if (raw) return new Set<number>(JSON.parse(raw));
+    } catch {
+      // ignore
+    }
+    return new Set();
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        "labellex.viewer.foldedLabels",
+        JSON.stringify(Array.from(foldedParentIds)),
+      );
+    } catch {
+      // ignore
+    }
+  }, [foldedParentIds]);
+
+  const childrenByParentId = useMemo(() => {
+    const m = new Map<number, number[]>();
+    for (const l of labels) {
+      if (l.parent_id !== null) {
+        const arr = m.get(l.parent_id);
+        if (arr) arr.push(l.id);
+        else m.set(l.parent_id, [l.id]);
+      }
+    }
+    return m;
+  }, [labels]);
+
+  const hiddenLabelIds = useMemo(() => {
+    const out = new Set<number>();
+    const stack = Array.from(foldedParentIds);
+    while (stack.length > 0) {
+      const id = stack.pop()!;
+      for (const c of childrenByParentId.get(id) ?? []) {
+        if (!out.has(c)) {
+          out.add(c);
+          stack.push(c);
+        }
+      }
+    }
+    return out;
+  }, [foldedParentIds, childrenByParentId]);
+
+  const toggleFoldLabel = useCallback((parentId: number) => {
+    setFoldedParentIds((cur) => {
+      const next = new Set(cur);
+      if (next.has(parentId)) next.delete(parentId);
+      else next.add(parentId);
+      return next;
+    });
+  }, []);
+
   // ---------- Preview annotations (with handle/confirm overrides) --------
   const annotationsForRender = useMemo(() => {
     if (!handleDrag && !spanConfirm) return annotations;
@@ -662,6 +733,7 @@ export default function DocumentViewer() {
   const annotationsByPageForRender = useMemo(() => {
     const m = new Map<number, Annotation[]>();
     for (const a of annotationsForRender) {
+      if (hiddenLabelIds.has(a.label_definition_id)) continue;
       for (let n = a.start_page_num; n <= a.end_page_num; n++) {
         const arr = m.get(n);
         if (arr) arr.push(a);
@@ -669,7 +741,7 @@ export default function DocumentViewer() {
       }
     }
     return m;
-  }, [annotationsForRender]);
+  }, [annotationsForRender, hiddenLabelIds]);
 
   // ---------- Annotation create / update / delete ------------------------
   const cancelPopover = () => setPopover(null);
@@ -743,6 +815,19 @@ export default function DocumentViewer() {
       setLinkingMode({
         ...linkingMode,
         picker: { targetId: ann.id, x: e.clientX + 6, y: e.clientY + 6 },
+      });
+      return;
+    }
+
+    // Double-click → show the full annotated text in a read-only popover.
+    // `e.detail` is the click count; 2 means double-click. The first
+    // click already opened the editor popover; we overwrite it here.
+    if (e.detail === 2) {
+      setPopover({
+        kind: "text",
+        annotationId: ann.id,
+        x: e.clientX + 6,
+        y: e.clientY + 6,
       });
       return;
     }
@@ -1476,9 +1561,14 @@ export default function DocumentViewer() {
     resizingAnnotationId === null;
 
   // Per-page selection slice for highlighting active drag / awaiting picker.
+  // Only the two picker kinds carry a `range`; editor and text popovers
+  // don't (they're keyed to a specific existing annotation).
   const liveRange: CrossPageRange | null =
     drag ??
-    (popover && popover.kind !== "editor" ? popover.range : null);
+    (popover &&
+    (popover.kind === "picker-label" || popover.kind === "picker-attrs")
+      ? popover.range
+      : null);
 
   return (
     <>
@@ -1807,8 +1897,12 @@ export default function DocumentViewer() {
         </div>
         {showPanel && (
           <AnnotationListPanel
-            annotations={annotations}
+            annotations={annotations.filter(
+              (a) => !hiddenLabelIds.has(a.label_definition_id),
+            )}
             labels={labels}
+            foldedParentIds={foldedParentIds}
+            onToggleFold={toggleFoldLabel}
             currentPage={currentPage}
             onJumpTo={(pageNum, annId) => jumpToAnnotation(pageNum, annId)}
             onEdit={(annId, anchor) => {
@@ -2230,7 +2324,9 @@ export default function DocumentViewer() {
                             className="label-swatch"
                             style={{ background: label?.color ?? "#1d4ed8" }}
                           />
-                          {label?.name ?? `label #${c.label_definition_id}`}
+                          {label
+                            ? displayLabelName(label, labelById)
+                            : `label #${c.label_definition_id}`}
                         </span>
                       </div>
                       <div className="candidate-snippet">"{snippet}"</div>
@@ -2806,6 +2902,62 @@ function PopoverShell({
     );
   }
 
+  if (popover.kind === "text") {
+    const ann = annotations.find((a) => a.id === popover.annotationId);
+    if (!ann) return null;
+    const label = labelById.get(ann.label_definition_id);
+    return (
+      <DraggablePopover initialX={popover.x} initialY={popover.y}>
+        <div className="picker-title" data-drag-handle>
+          <span
+            className="label-swatch"
+            style={{ background: label?.color ?? "#94a3b8", marginRight: 6 }}
+          />
+          {(() => {
+            const { name, depthChip } = labelChipParts(label, labelById);
+            return (
+              <>
+                {name}
+                {depthChip && (
+                  <span className="ann-level" style={{ marginLeft: 6 }}>
+                    {depthChip}
+                  </span>
+                )}
+              </>
+            );
+          })()}
+          <span style={{ marginLeft: 8, fontSize: 11, color: "#94a3b8", fontWeight: 400 }}>
+            {ann.start_page_num === ann.end_page_num
+              ? `p.${ann.start_page_num}`
+              : `p.${ann.start_page_num}–${ann.end_page_num}`}
+            {" · "}
+            {ann.text.length.toLocaleString()} chars
+          </span>
+          <span style={{ flex: 1 }} />
+          <button className="btn ghost btn-xs" onClick={onCancel}>
+            close ✕
+          </button>
+        </div>
+        <div
+          style={{
+            padding: "8px 10px",
+            maxWidth: 520,
+            maxHeight: 480,
+            overflow: "auto",
+            whiteSpace: "pre-wrap",
+            fontSize: 13,
+            lineHeight: 1.45,
+            color: "#1e293b",
+            background: "#f8fafc",
+            borderRadius: 4,
+          }}
+        >
+          {ann.text}
+        </div>
+      </DraggablePopover>
+    );
+  }
+
   // editor
   const ann = annotations.find((a) => a.id === popover.annotationId);
   if (!ann) return null;
@@ -2822,7 +2974,19 @@ function PopoverShell({
     <DraggablePopover initialX={popover.x} initialY={popover.y}>
       <div className="picker-title" data-drag-handle>
         <span className="label-swatch" style={{ background: label.color, marginRight: 6 }} />
-        {label.name}
+        {(() => {
+          const { name, depthChip } = labelChipParts(label, labelById);
+          return (
+            <>
+              {name}
+              {depthChip && (
+                <span className="ann-level" style={{ marginLeft: 6 }}>
+                  {depthChip}
+                </span>
+              )}
+            </>
+          );
+        })()}
         <span
           style={{ marginLeft: 8, fontSize: 11, color: "#94a3b8", fontWeight: 400 }}
         >
@@ -2950,7 +3114,11 @@ function RelationsSection({
                   onClick={() =>
                     other && onJumpToAnnotation(other.start_page_num, other.id)
                   }
-                  title={otherLabel?.name ?? undefined}
+                  title={
+                    otherLabel
+                      ? displayLabelName(otherLabel, labelById)
+                      : undefined
+                  }
                 >
                   {other && (
                     <span

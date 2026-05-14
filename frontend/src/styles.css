@@ -178,6 +178,18 @@ button {
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
+/* Depth chip for Sub-paragraph chain annotations. Same shape as .ann-page
+ * so the row reads as a uniform pill strip; slight color shift so it
+ * isn't confused with the page chip at a glance. */
+.ann-level {
+  background: #ede9fe;
+  color: #6d28d9;
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
 .ann-text { color: #334155; font-size: 12.5px; margin-top: 4px; line-height: 1.4; }
 .ann-attrs {
   color: #64748b;

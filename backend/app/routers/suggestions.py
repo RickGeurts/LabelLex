@@ -18,6 +18,7 @@ Two flavours of suggestion:
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
@@ -60,6 +61,7 @@ from ..services.clause_instrument_discovery_claude import (
     discover_on_page_claude,
     get_claude_client,
 )
+from ..services.subparagraph_segmenter import segment_subparagraphs
 from ..services.document_activity import touch_document
 from ..services.ollama import OllamaError, get_ollama_client
 from ..services.strategies import route_for_attribute_prediction
@@ -800,3 +802,278 @@ def auto_label_document(
     return StreamingResponse(
         event_stream(), media_type="application/x-ndjson"
     )
+
+
+# --- Sub-paragraph segmentation (regex-only) ------------------------------
+
+
+_CLAUSE_NUMBER_RE = re.compile(r"^\s*(\d{1,3})\b")
+
+
+def _resolve_subparagraph_chain(
+    db: Session, root_label_id: int, project_id: int
+) -> list[int]:
+    """Walk parent_id links downward from the Sub-paragraph root to
+    build a flat chain [level2_id, level3_id, level4_id, ...].
+
+    At each step we expect a single child (the project ontology models a
+    linear Sub-paragraph → Sub-sub-paragraph → ... chain). If a label
+    has multiple children, the lowest id wins so the chain stays
+    deterministic. Stops when a label has no children.
+    """
+    chain: list[int] = [root_label_id]
+    current = root_label_id
+    while True:
+        next_child = db.scalars(
+            select(LabelDefinition)
+            .where(LabelDefinition.parent_id == current)
+            .where(LabelDefinition.project_id == project_id)
+            .order_by(LabelDefinition.id)
+            .limit(1)
+        ).first()
+        if next_child is None:
+            break
+        chain.append(next_child.id)
+        current = next_child.id
+    return chain
+
+
+def _label_subparagraphs_for_document(
+    db: Session,
+    document_id: int,
+    chain: list[int],
+    clause_label_id: int,
+) -> tuple[int, dict[int, int]]:
+    """Walk every Clause annotation; segment sub-paragraphs and assign
+    each to the label in `chain` corresponding to its nesting level.
+
+    `chain[0]` is the level-2 label (Sub-paragraph), `chain[1]` level-3,
+    etc. Spans deeper than the chain length collapse onto the last
+    label (so the deepest available label catches everything below it).
+
+    The level is computed by the segmenter from indentation clustering
+    with a style-stack fallback. Parent clause number is extracted from
+    the clause text's leading `N.` so numeric markers like `14.2` are
+    rejected when found inside a clause whose number isn't 14.
+
+    Returns (clauses_scanned, written_by_level) where written_by_level
+    maps absolute nesting level → annotations created at that level.
+    """
+    from datetime import datetime, timezone
+
+    clause_anns = list(
+        db.scalars(
+            select(Annotation)
+            .where(Annotation.document_id == document_id)
+            .where(Annotation.label_definition_id == clause_label_id)
+            .order_by(Annotation.start_page_num, Annotation.start_char)
+        ).all()
+    )
+    written_by_level: dict[int, int] = {}
+    for clause in clause_anns:
+        clause_number: int | None = None
+        m = _CLAUSE_NUMBER_RE.match(clause.text or "")
+        if m:
+            try:
+                clause_number = int(m.group(1))
+            except ValueError:
+                clause_number = None
+        pages = list(
+            db.scalars(
+                select(Page)
+                .where(Page.document_id == document_id)
+                .where(Page.page_num >= clause.start_page_num)
+                .where(Page.page_num <= clause.end_page_num)
+                .order_by(Page.page_num)
+            ).all()
+        )
+        spans = segment_subparagraphs(
+            pages,
+            clause.start_page_num,
+            clause.start_char,
+            clause.end_page_num,
+            clause.end_char,
+            clause_number=clause_number,
+        )
+        now = datetime.now(timezone.utc)
+        for s in spans:
+            idx = max(0, min(s.level - 2, len(chain) - 1))
+            target_label_id = chain[idx]
+            effective_level = idx + 2
+            ann = Annotation(
+                document_id=document_id,
+                label_definition_id=target_label_id,
+                start_page_num=s.start_page_num,
+                start_char=s.start_char,
+                end_page_num=s.end_page_num,
+                end_char=s.end_char,
+                text=s.text,
+                created_by=settings.default_user_id,
+            )
+            db.add(ann)
+            db.flush()
+            audit = AnnotationSuggestion(
+                document_id=document_id,
+                label_definition_id=target_label_id,
+                text=s.text,
+                start_page_num=s.start_page_num,
+                start_char=s.start_char,
+                end_page_num=s.end_page_num,
+                end_char=s.end_char,
+                strategy="auto_label_subparagraphs_regex",
+                model="regex-only",
+                confidence=0.95,
+                suggested_attributes=[],
+                status="accepted_as_is",
+                annotation_id=ann.id,
+                label_changed=False,
+                span_changed=False,
+                attributes_changed=False,
+                resolved_at=now,
+                resolved_by=settings.default_user_id,
+            )
+            db.add(audit)
+            written_by_level[effective_level] = (
+                written_by_level.get(effective_level, 0) + 1
+            )
+    return len(clause_anns), written_by_level
+
+
+@router.post("/documents/{document_id}/auto-label-subparagraphs")
+def auto_label_subparagraphs(
+    document_id: int,
+    sub_paragraph_label_id: int,
+    clause_label_id: int = 1,
+    replace_existing: bool = True,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Detect sub-paragraphs within each Clause annotation on this doc
+    and assign each to the label in the Sub-paragraph chain matching its
+    nesting level. The chain is walked from `sub_paragraph_label_id`
+    downward via `parent_id` links — every child added to the chain
+    extends the addressable depth by one level. Spans deeper than the
+    chain collapse onto the deepest label.
+
+    `replace_existing=true` (default) deletes any prior annotations
+    carrying any label in the chain before running.
+    """
+    doc = db.get(Document, document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    sub_label = db.get(LabelDefinition, sub_paragraph_label_id)
+    clause_label = db.get(LabelDefinition, clause_label_id)
+    if sub_label is None or clause_label is None:
+        raise HTTPException(status_code=404, detail="Label not found")
+    project_id = doc.project_id
+    if sub_label.project_id != project_id or clause_label.project_id != project_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Labels must belong to the document's project",
+        )
+
+    chain = _resolve_subparagraph_chain(db, sub_label.id, project_id)
+
+    if replace_existing:
+        existing = list(
+            db.scalars(
+                select(Annotation)
+                .where(Annotation.document_id == document_id)
+                .where(Annotation.label_definition_id.in_(chain))
+            ).all()
+        )
+        for ann in existing:
+            db.delete(ann)
+        db.flush()
+
+    clauses_scanned, written_by_level = _label_subparagraphs_for_document(
+        db, document_id, chain, clause_label.id
+    )
+    touch_document(db, document_id)
+    db.commit()
+    return {
+        "ok": True,
+        "document_id": document_id,
+        "clauses_scanned": clauses_scanned,
+        "chain_label_ids": chain,
+        "written_by_level": written_by_level,
+        "total_written": sum(written_by_level.values()),
+    }
+
+
+@router.post(
+    "/projects/{project_id}/auto-label-subparagraphs-all"
+)
+def auto_label_subparagraphs_all(
+    project_id: int,
+    sub_paragraph_label_id: int,
+    clause_label_id: int = 1,
+    replace_existing: bool = True,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Run the sub-paragraph segmenter against every document in the
+    project. The label chain is derived once from
+    `sub_paragraph_label_id` (walking `parent_id` children) and reused
+    across all documents. Returns per-doc counts and a project total.
+    """
+    sub_label = db.get(LabelDefinition, sub_paragraph_label_id)
+    clause_label = db.get(LabelDefinition, clause_label_id)
+    if sub_label is None or clause_label is None:
+        raise HTTPException(status_code=404, detail="Label not found")
+    if sub_label.project_id != project_id or clause_label.project_id != project_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Labels must belong to the project",
+        )
+
+    chain = _resolve_subparagraph_chain(db, sub_label.id, project_id)
+
+    docs = list(
+        db.scalars(
+            select(Document)
+            .where(Document.project_id == project_id)
+            .order_by(Document.id)
+        ).all()
+    )
+
+    per_doc: list[dict] = []
+    project_by_level: dict[int, int] = {}
+    for doc in docs:
+        if replace_existing:
+            existing = list(
+                db.scalars(
+                    select(Annotation)
+                    .where(Annotation.document_id == doc.id)
+                    .where(Annotation.label_definition_id.in_(chain))
+                ).all()
+            )
+            for ann in existing:
+                db.delete(ann)
+            db.flush()
+
+        clauses_scanned, written_by_level = _label_subparagraphs_for_document(
+            db, doc.id, chain, clause_label.id
+        )
+        doc_total = sum(written_by_level.values())
+        if clauses_scanned > 0 or doc_total > 0:
+            touch_document(db, doc.id)
+        per_doc.append(
+            {
+                "document_id": doc.id,
+                "filename": doc.filename,
+                "clauses_scanned": clauses_scanned,
+                "written_by_level": written_by_level,
+                "total_written": doc_total,
+            }
+        )
+        for lvl, n in written_by_level.items():
+            project_by_level[lvl] = project_by_level.get(lvl, 0) + n
+    db.commit()
+    return {
+        "ok": True,
+        "project_id": project_id,
+        "documents_processed": len(docs),
+        "chain_label_ids": chain,
+        "total_by_level": project_by_level,
+        "total_written": sum(project_by_level.values()),
+        "per_document": per_doc,
+    }

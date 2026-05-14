@@ -3,6 +3,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 
 import type { Annotation, AttributeDefinition, Label, Page, Word } from "../types";
 import {
+  displayLabelName,
   lineRects,
   pageAnnotationSlice,
 } from "../utils/spans";
@@ -47,9 +48,10 @@ interface Props {
 function describeAnnotation(
   ann: Annotation,
   label: Label | undefined,
+  labelById: Map<number, Label>,
   attrDefById: Map<number, AttributeDefinition>,
 ): string {
-  const parts: string[] = [label?.name ?? "Label"];
+  const parts: string[] = [displayLabelName(label, labelById)];
   for (const a of ann.attributes) {
     const def = attrDefById.get(a.attribute_def_id);
     parts.push(`${def?.name ?? a.attribute_def_id}=${JSON.stringify(a.value)}`);
@@ -180,7 +182,7 @@ export default function PdfPage({
         .map(({ ann, words }) => {
           const label = labelById.get(ann.label_definition_id);
           const color = label?.color ?? "#6366f1";
-          const tooltip = describeAnnotation(ann, label, attrDefById);
+          const tooltip = describeAnnotation(ann, label, labelById, attrDefById);
           const isResizing = resizingAnnotationId === ann.id;
           const rects = lineRects(words, page.words, scale);
           return rects.map((r, i) => (
@@ -210,7 +212,7 @@ export default function PdfPage({
         .map(({ ann, words }) => {
           const label = labelById.get(ann.label_definition_id);
           const color = label?.color ?? "#1d4ed8";
-          const tooltip = describeAnnotation(ann, label, attrDefById);
+          const tooltip = describeAnnotation(ann, label, labelById, attrDefById);
           const isResizing = resizingAnnotationId === ann.id;
           const rects = lineRects(words, page.words, scale);
           return rects.map((r, i) => (

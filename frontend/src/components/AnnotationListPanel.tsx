@@ -1,6 +1,11 @@
 import { useMemo, useState } from "react";
 
 import type { Annotation, AttributeDefinition, Label } from "../types";
+import {
+  displayLabelName,
+  isDescendantOfSubParagraph,
+  labelChipParts,
+} from "../utils/spans";
 
 type SortMode = "page" | "label" | "newest";
 
@@ -11,6 +16,11 @@ interface Props {
   onJumpTo: (pageNum: number, annotationId: number) => void;
   onEdit: (annotationId: number, anchor: { x: number; y: number }) => void;
   onDelete: (annotationId: number) => void;
+  // Fold child labels into their parent for the PDF overlay + this list.
+  // `foldedParentIds` is the set of parent label IDs whose descendants are
+  // hidden. `onToggleFold` flips one parent's folded state.
+  foldedParentIds?: Set<number>;
+  onToggleFold?: (parentId: number) => void;
 }
 
 // Span containment used by the "inside scopes only" filter. A clause
@@ -42,6 +52,8 @@ export default function AnnotationListPanel({
   onJumpTo,
   onEdit,
   onDelete,
+  foldedParentIds,
+  onToggleFold,
 }: Props) {
   const [filterLabel, setFilterLabel] = useState<number | "all">("all");
   const [search, setSearch] = useState("");
@@ -52,6 +64,25 @@ export default function AnnotationListPanel({
     () => new Map(labels.map((l) => [l.id, l])),
     [labels],
   );
+
+  // Labels with children (other labels whose parent_id points to them).
+  // These are the labels that can be folded — folding hides all their
+  // descendants from both this list and the PDF overlay.
+  //
+  // Chain-internal labels (every descendant of Sub-paragraph) are
+  // suppressed here — folding the Sub-paragraph chip already cascades
+  // to the whole sub-paragraph subtree, so showing per-depth chips just
+  // clutters the row.
+  const labelsWithChildren = useMemo(() => {
+    const parentIds = new Set<number>();
+    for (const l of labels) {
+      if (l.parent_id !== null) parentIds.add(l.parent_id);
+    }
+    return labels
+      .filter((l) => parentIds.has(l.id))
+      .filter((l) => !isDescendantOfSubParagraph(l, labelById))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [labels, labelById]);
   const attrDefById = useMemo(() => {
     const m = new Map<number, AttributeDefinition>();
     for (const l of labels) for (const a of l.attributes) m.set(a.id, a);
@@ -124,6 +155,58 @@ export default function AnnotationListPanel({
           </span>
         </div>
         <div className="ann-controls">
+          {labelsWithChildren.length > 0 && onToggleFold && (
+            <div
+              style={{
+                display: "flex",
+                flexWrap: "wrap",
+                gap: 4,
+                fontSize: 11,
+                color: "#475569",
+                marginBottom: 4,
+              }}
+              title="Click to fold a label's children (Sub-paragraph etc.) — hides them from the list and from the PDF overlay"
+            >
+              <span style={{ color: "#94a3b8", marginRight: 2 }}>Fold:</span>
+              {labelsWithChildren.map((parent) => {
+                const folded = foldedParentIds?.has(parent.id) ?? false;
+                return (
+                  <button
+                    key={parent.id}
+                    onClick={() => onToggleFold(parent.id)}
+                    title={
+                      folded
+                        ? `Show children of "${parent.name}"`
+                        : `Hide children of "${parent.name}"`
+                    }
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      padding: "2px 6px",
+                      borderRadius: 4,
+                      border: `1px solid ${parent.color}`,
+                      background: folded ? parent.color + "33" : "transparent",
+                      color: folded ? parent.color : "#475569",
+                      fontSize: 11,
+                      cursor: "pointer",
+                    }}
+                  >
+                    <span>{folded ? "▶" : "▼"}</span>
+                    <span
+                      style={{
+                        width: 8,
+                        height: 8,
+                        borderRadius: 2,
+                        background: parent.color,
+                      }}
+                    />
+                    <span>{parent.name}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
           <input
             type="text"
             placeholder="Search annotated text…"
@@ -141,7 +224,7 @@ export default function AnnotationListPanel({
               <option value="all">All labels</option>
               {labels.map((l) => (
                 <option key={l.id} value={l.id}>
-                  {l.name}
+                  {displayLabelName(l, labelById)}
                 </option>
               ))}
             </select>
@@ -205,7 +288,17 @@ export default function AnnotationListPanel({
                 />
                 <div>
                   <div className="ann-meta">
-                    <span className="ann-label">{label?.name ?? "(unknown)"}</span>
+                    {(() => {
+                      const { name, depthChip } = labelChipParts(label, labelById);
+                      return (
+                        <>
+                          <span className="ann-label">{name}</span>
+                          {depthChip && (
+                            <span className="ann-level">{depthChip}</span>
+                          )}
+                        </>
+                      );
+                    })()}
                     <span className="ann-page">{pageBadge}</span>
                     <span style={{ flex: 1 }} />
                     <button

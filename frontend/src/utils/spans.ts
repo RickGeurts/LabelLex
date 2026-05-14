@@ -142,3 +142,89 @@ export function isValueFilled(value: unknown, type: string): boolean {
   if (typeof value === "number") return Number.isFinite(value);
   return true;
 }
+
+// The Sub-paragraph chain (Sub-paragraph → depth 3 → ... → depth N) is
+// rendered as a single conceptual label "Sub-paragraph" with a depth chip
+// "·L{n}" instead of names like "depth 11". Display-only — the underlying
+// labels remain distinct in storage.
+export const SUB_PARAGRAPH_LABEL_NAME = "Sub-paragraph";
+
+/** Depth of `label` in its hierarchy, counting from 1 at the root. */
+export function labelDepth(
+  label: Label | undefined,
+  byId: Map<number, Label>,
+): number {
+  if (!label) return 1;
+  let depth = 1;
+  const seen = new Set<number>([label.id]);
+  let cur: Label | undefined = label;
+  while (cur?.parent_id != null) {
+    const parent = byId.get(cur.parent_id);
+    if (!parent || seen.has(parent.id)) break;
+    seen.add(parent.id);
+    depth++;
+    cur = parent;
+  }
+  return depth;
+}
+
+/** True if `label` is the Sub-paragraph root or any descendant of it. */
+export function isInSubParagraphChain(
+  label: Label | undefined,
+  byId: Map<number, Label>,
+): boolean {
+  if (!label) return false;
+  const seen = new Set<number>();
+  let cur: Label | undefined = label;
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    if (cur.name === SUB_PARAGRAPH_LABEL_NAME) return true;
+    cur = cur.parent_id != null ? byId.get(cur.parent_id) : undefined;
+  }
+  return false;
+}
+
+/** True if any strict ancestor of `label` is in the Sub-paragraph chain.
+ * Used to hide chain-internal labels from fold chips — only the chain
+ * root surfaces a chip, and folding it cascades to all descendants. */
+export function isDescendantOfSubParagraph(
+  label: Label | undefined,
+  byId: Map<number, Label>,
+): boolean {
+  if (!label || label.parent_id == null) return false;
+  const parent = byId.get(label.parent_id);
+  return isInSubParagraphChain(parent, byId);
+}
+
+/** Display name for an annotation's label as a single flat string —
+ * used for tooltips and dropdown options where chip layout isn't an
+ * option. Chain labels become "Sub-paragraph ·L{n}". */
+export function displayLabelName(
+  label: Label | undefined,
+  byId: Map<number, Label>,
+): string {
+  if (!label) return "(unknown)";
+  if (isInSubParagraphChain(label, byId)) {
+    return `${SUB_PARAGRAPH_LABEL_NAME} ·L${labelDepth(label, byId)}`;
+  }
+  return label.name;
+}
+
+/** Split the display name into a base label name and an optional depth
+ * chip text. Used by chip-rendering contexts (panel rows, popover
+ * headers) so the depth can be styled as its own pill alongside the
+ * page chip. `depthChip` is null when the label isn't in the
+ * Sub-paragraph chain. */
+export function labelChipParts(
+  label: Label | undefined,
+  byId: Map<number, Label>,
+): { name: string; depthChip: string | null } {
+  if (!label) return { name: "(unknown)", depthChip: null };
+  if (isInSubParagraphChain(label, byId)) {
+    return {
+      name: SUB_PARAGRAPH_LABEL_NAME,
+      depthChip: `L${labelDepth(label, byId)}`,
+    };
+  }
+  return { name: label.name, depthChip: null };
+}
