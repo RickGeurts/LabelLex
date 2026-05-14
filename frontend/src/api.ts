@@ -16,8 +16,10 @@ import type {
   Label,
   LabelCreate,
   LabelUpdate,
+  LlmProvidersStatus,
   OllamaStatus,
   Page,
+  PrelabelCIRequest,
   PrelabelEvent,
   PrelabelRequest,
   Project,
@@ -29,6 +31,7 @@ import type {
   SuggestAttributesIn,
   SuggestAttributesOut,
   SuggestionListItem,
+  TncRange,
 } from "./types";
 
 async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
@@ -42,6 +45,38 @@ async function jsonRequest<T>(url: string, init?: RequestInit): Promise<T> {
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;
+}
+
+async function streamNdjson<TBody, TEvent>(
+  url: string,
+  body: TBody,
+  onEvent: (e: TEvent) => void,
+): Promise<void> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new Error(`${res.status} ${res.statusText}: ${await res.text()}`);
+  }
+  if (!res.body) throw new Error("Stream not supported by this browser");
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) onEvent(JSON.parse(line) as TEvent);
+    }
+  }
+  const tail = buf.trim();
+  if (tail) onEvent(JSON.parse(tail) as TEvent);
 }
 
 export const api = {
@@ -180,36 +215,24 @@ export const api = {
     documentId: number,
     payload: PrelabelRequest,
     onEvent: (e: PrelabelEvent) => void,
-  ): Promise<void> => {
-    const res = await fetch(`/api/documents/${documentId}/prelabel`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`${res.status} ${res.statusText}: ${body}`);
-    }
-    if (!res.body) {
-      throw new Error("Stream not supported by this browser");
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let nl: number;
-      while ((nl = buf.indexOf("\n")) >= 0) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (line) onEvent(JSON.parse(line) as PrelabelEvent);
-      }
-    }
-    const tail = buf.trim();
-    if (tail) onEvent(JSON.parse(tail) as PrelabelEvent);
-  },
+  ): Promise<void> => streamNdjson(
+    `/api/documents/${documentId}/prelabel`,
+    payload,
+    onEvent,
+  ),
+  getTncRanges: (documentId: number) =>
+    jsonRequest<TncRange[]>(`/api/documents/${documentId}/tnc-ranges`),
+  getLlmProviders: () =>
+    jsonRequest<LlmProvidersStatus>("/api/llm-providers"),
+  prelabelClausesInstrumentsStream: async (
+    documentId: number,
+    payload: PrelabelCIRequest,
+    onEvent: (e: PrelabelEvent) => void,
+  ): Promise<void> => streamNdjson(
+    `/api/documents/${documentId}/prelabel-clauses-instruments`,
+    payload,
+    onEvent,
+  ),
   listDocumentSuggestions: (documentId: number, status: string = "pending") =>
     jsonRequest<SuggestionListItem[]>(
       `/api/documents/${documentId}/suggestions?status=${encodeURIComponent(status)}`,

@@ -32,20 +32,32 @@ from ..models import (
     Annotation,
     AnnotationAttribute,
     AnnotationSuggestion,
+    AttributeDefinition,
     Document,
     LabelDefinition,
     Page,
 )
 from ..schemas import (
     AnnotationOut,
+    PrelabelCIRequest,
     PrelabelRequest,
     SuggestAttributesIn,
     SuggestAttributesOut,
     SuggestedAttribute,
     SuggestionListItem,
+    TncRangeOut,
 )
 from ..services.attributes import collect_effective_attributes
 from ..services.clause_discovery import discover_clauses_on_page
+from ..services.clause_instrument_discovery import (
+    detect_tnc_ranges,
+    discover_on_page as discover_ci_on_page,
+)
+from ..services.clause_instrument_discovery_claude import (
+    collect_few_shot_examples,
+    discover_on_page_claude,
+    get_claude_client,
+)
 from ..services.document_activity import touch_document
 from ..services.ollama import OllamaError, get_ollama_client
 from ..services.strategies import route_for_attribute_prediction
@@ -445,3 +457,272 @@ def reject_suggestion(
     sug.resolved_at = datetime.now(timezone.utc)
     sug.resolved_by = settings.default_user_id
     db.commit()
+
+
+# --- Pre-label clauses + instruments (scope-label workflow) ---------------
+
+
+@router.get("/llm-providers")
+def list_llm_providers() -> dict:
+    """Report which provider backends are configured.
+
+    The UI uses this to gate the "Claude" option in the pre-label modal —
+    if `claude.available` is false, the toggle is disabled.
+    """
+    return {
+        "ollama": {
+            "available": True,
+            "model": settings.ollama_model,
+        },
+        "claude": {
+            "available": bool(settings.anthropic_api_key),
+            "model": settings.anthropic_model,
+        },
+    }
+
+
+@router.get(
+    "/documents/{document_id}/tnc-ranges",
+    response_model=list[TncRangeOut],
+)
+def get_tnc_ranges(
+    document_id: int, db: Session = Depends(get_db)
+) -> list[TncRangeOut]:
+    """Detect Terms & Conditions page ranges via the document outline.
+
+    Empty list when the outline doesn't yield T&C-titled entries — the
+    UI should then fall back to letting the user pick a range manually.
+    """
+    doc = db.get(Document, document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    ranges = detect_tnc_ranges(doc.file_path)
+    return [
+        TncRangeOut(
+            start_page_num=r.start_page_num,
+            end_page_num=r.end_page_num,
+            title=r.title,
+        )
+        for r in ranges
+    ]
+
+
+@router.post("/documents/{document_id}/prelabel-clauses-instruments")
+def prelabel_clauses_and_instruments(
+    document_id: int,
+    payload: PrelabelCIRequest,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """Sweep the T&C section page-by-page; persist Clause + Instrument
+    suggestions with status=pending.
+
+    NDJSON event shape mirrors `/prelabel`:
+      - {"type":"started","model":...,"total_pages":N,"ranges":[...]}
+      - {"type":"page_done","page_num":X,"pages_done":K,"pages_total":N,
+         "candidates":[...]}
+      - {"type":"done"}
+      - {"type":"error","message":...}
+
+    Each candidate carries `suggested_attributes` so Instrument
+    suggestions reach the review modal with the Ranking pre-filled.
+    """
+    doc = db.get(Document, document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    clause_label = db.get(LabelDefinition, payload.clause_label_id)
+    instrument_label = db.get(LabelDefinition, payload.instrument_label_id)
+    if clause_label is None or instrument_label is None:
+        raise HTTPException(status_code=404, detail="Scope label not found")
+    if (
+        clause_label.project_id != doc.project_id
+        or instrument_label.project_id != doc.project_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Scope labels must belong to the document's project",
+        )
+
+    ranking_attr = db.get(
+        AttributeDefinition, payload.instrument_ranking_attribute_id
+    )
+    if ranking_attr is None or ranking_attr.label_id != instrument_label.id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Ranking attribute must belong to the instrument scope label"
+            ),
+        )
+    if ranking_attr.value_type != "enum" or not ranking_attr.enum_values:
+        raise HTTPException(
+            status_code=400,
+            detail="Ranking attribute must be an enum with enum_values",
+        )
+    ranking_values = list(ranking_attr.enum_values)
+
+    # Resolve page range — either explicit or auto-detect from outline.
+    if (
+        payload.start_page_num is not None
+        and payload.end_page_num is not None
+    ):
+        if payload.start_page_num < 1 or payload.end_page_num < payload.start_page_num:
+            raise HTTPException(status_code=400, detail="Invalid page range")
+        if payload.end_page_num > doc.page_count:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"end_page_num ({payload.end_page_num}) exceeds document "
+                    f"page count ({doc.page_count})"
+                ),
+            )
+        ranges = [
+            (payload.start_page_num, payload.end_page_num, "user-supplied")
+        ]
+    else:
+        detected = detect_tnc_ranges(doc.file_path)
+        if not detected:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No Terms & Conditions section found in the document "
+                    "outline. Supply start_page_num and end_page_num manually."
+                ),
+            )
+        ranges = [(r.start_page_num, r.end_page_num, r.title) for r in detected]
+
+    # Pick the LLM backend. Ollama path needs reachability + a pulled model;
+    # Claude path needs an API key on the server.
+    if payload.provider == "claude":
+        claude_client = get_claude_client()
+        if claude_client is None:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Claude provider selected but LABELLEX_ANTHROPIC_API_KEY "
+                    "is not configured on the server."
+                ),
+            )
+        few_shot = collect_few_shot_examples(
+            db,
+            project_id=doc.project_id,
+            clause_label_id=clause_label.id,
+            instrument_label_id=instrument_label.id,
+            ranking_attribute_id=ranking_attr.id,
+            exclude_document_id=document_id,
+        )
+        model_label = settings.anthropic_model
+        strategy_tag = "clause_instrument_discovery_claude"
+
+        def _discover(page: Page) -> list:
+            return discover_on_page_claude(
+                page,
+                clause_label=clause_label,
+                instrument_label=instrument_label,
+                ranking_attribute_id=ranking_attr.id,
+                ranking_values=ranking_values,
+                examples=few_shot,
+                client=claude_client,
+                model=settings.anthropic_model,
+            )
+    else:
+        _ensure_ollama_ready()
+        ollama_client = get_ollama_client()
+        model_label = ollama_client.default_model
+        strategy_tag = "clause_instrument_discovery"
+
+        def _discover(page: Page) -> list:
+            return discover_ci_on_page(
+                page,
+                clause_label=clause_label,
+                instrument_label=instrument_label,
+                ranking_attribute_id=ranking_attr.id,
+                ranking_values=ranking_values,
+                ollama=ollama_client,
+            )
+
+    pages: list[Page] = []
+    for start, end, _ in ranges:
+        page_rows = list(
+            db.scalars(
+                select(Page)
+                .where(Page.document_id == document_id)
+                .where(Page.page_num >= start)
+                .where(Page.page_num <= end)
+                .order_by(Page.page_num)
+            ).all()
+        )
+        pages.extend(page_rows)
+
+    def event_stream() -> Iterator[str]:
+        yield json.dumps(
+            {
+                "type": "started",
+                "model": model_label,
+                "total_pages": len(pages),
+                "ranges": [
+                    {
+                        "start_page_num": s,
+                        "end_page_num": e,
+                        "title": t,
+                    }
+                    for s, e, t in ranges
+                ],
+            }
+        ) + "\n"
+        try:
+            for i, page in enumerate(pages, start=1):
+                page_candidates: list[dict] = []
+                discovered = _discover(page)
+                for c in discovered:
+                    suggestion = AnnotationSuggestion(
+                        document_id=document_id,
+                        label_definition_id=c.label_definition_id,
+                        text=c.text,
+                        start_page_num=c.start_page_num,
+                        start_char=c.start_char,
+                        end_page_num=c.end_page_num,
+                        end_char=c.end_char,
+                        strategy=strategy_tag,
+                        model=model_label,
+                        confidence=c.confidence,
+                        suggested_attributes=c.suggested_attributes,
+                        status="pending",
+                    )
+                    db.add(suggestion)
+                    db.flush()
+                    page_candidates.append(
+                        {
+                            "suggestion_id": suggestion.id,
+                            "label_definition_id": c.label_definition_id,
+                            "start_page_num": c.start_page_num,
+                            "start_char": c.start_char,
+                            "end_page_num": c.end_page_num,
+                            "end_char": c.end_char,
+                            "text": c.text,
+                            "confidence": c.confidence,
+                            "suggested_attributes": c.suggested_attributes,
+                        }
+                    )
+                db.commit()
+                yield json.dumps(
+                    {
+                        "type": "page_done",
+                        "page_num": page.page_num,
+                        "pages_done": i,
+                        "pages_total": len(pages),
+                        "candidates": page_candidates,
+                    }
+                ) + "\n"
+            yield json.dumps({"type": "done"}) + "\n"
+        except OllamaError as exc:
+            db.rollback()
+            yield json.dumps({"type": "error", "message": str(exc)}) + "\n"
+        except Exception as exc:  # noqa: BLE001 — surface anything to client
+            db.rollback()
+            yield json.dumps(
+                {"type": "error", "message": f"Unexpected error: {exc}"}
+            ) + "\n"
+
+    return StreamingResponse(
+        event_stream(), media_type="application/x-ndjson"
+    )

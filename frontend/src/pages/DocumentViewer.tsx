@@ -22,9 +22,12 @@ import type {
   Document as DocModel,
   Label,
   Page as PageModel,
+  LlmProvider,
+  LlmProvidersStatus,
   PrelabelCandidate,
   RelationDefinition,
   SearchHit,
+  TncRange,
 } from "../types";
 import PdfPage from "../components/PdfPage";
 import AnnotationListPanel from "../components/AnnotationListPanel";
@@ -173,6 +176,7 @@ export default function DocumentViewer() {
 
   // Ollama-driven clause discovery (pre-labelling).
   interface PrelabelState {
+    mode: "labels" | "ci";
     startPage: number;
     endPage: number;
     selectedLabels: Set<number>;
@@ -182,8 +186,21 @@ export default function DocumentViewer() {
     lastModel: string | null;
     lastPagesScanned: number;
     progress: { done: number; total: number } | null;
+    // CI mode only.
+    tncRanges?: TncRange[] | null;
+    detecting?: boolean;
+    provider?: LlmProvider;
   }
   const [prelabelModal, setPrelabelModal] = useState<PrelabelState | null>(null);
+  const [llmProviders, setLlmProviders] = useState<LlmProvidersStatus | null>(null);
+  useEffect(() => {
+    api
+      .getLlmProviders()
+      .then(setLlmProviders)
+      .catch(() => {
+        // Non-fatal — toggle stays disabled.
+      });
+  }, []);
 
   const [showPanel, setShowPanel] = useState<boolean>(() => {
     try {
@@ -933,6 +950,201 @@ export default function DocumentViewer() {
       });
   }, [documentId]);
 
+  // ---------- Pre-label: scope-label workflow (clauses + instruments) -----
+
+  /** Pick the project's scope labels that drive the CI workflow.
+   *
+   * Convention: the project has two `is_scope` labels — one for clauses
+   * (no enum attribute) and one for instruments (an enum attribute that
+   * enumerates the Ranking values). Returning null means the project
+   * isn't set up for this flow yet — the button is disabled in that case.
+   */
+  const scopeLabelsForCI = useMemo(() => {
+    const scopes = labels.filter((l) => l.is_scope);
+    let clauseLabel: Label | null = null;
+    let instrumentLabel: Label | null = null;
+    let rankingAttrId: number | null = null;
+    for (const s of scopes) {
+      const enumAttr = s.attributes.find((a) => a.value_type === "enum");
+      if (enumAttr && instrumentLabel === null) {
+        instrumentLabel = s;
+        rankingAttrId = enumAttr.id;
+      } else if (!enumAttr && clauseLabel === null) {
+        clauseLabel = s;
+      }
+    }
+    if (!clauseLabel || !instrumentLabel || rankingAttrId === null) {
+      return null;
+    }
+    return { clauseLabel, instrumentLabel, rankingAttrId };
+  }, [labels]);
+
+  const openPrelabelCIModal = useCallback(() => {
+    if (!doc) return;
+    const defaultProvider: LlmProvider = llmProviders?.claude.available
+      ? "claude"
+      : "ollama";
+    setPrelabelModal({
+      mode: "ci",
+      startPage: 1,
+      endPage: doc.page_count,
+      selectedLabels: new Set(),
+      candidates: [],
+      running: false,
+      error: null,
+      lastModel: null,
+      lastPagesScanned: 0,
+      progress: null,
+      tncRanges: null,
+      detecting: true,
+      provider: defaultProvider,
+    });
+
+    api
+      .getTncRanges(documentId)
+      .then((ranges) => {
+        setPrelabelModal((prev) => {
+          if (!prev || prev.mode !== "ci") return prev;
+          const next: PrelabelState = { ...prev, tncRanges: ranges, detecting: false };
+          if (ranges.length > 0) {
+            next.startPage = ranges[0].start_page_num;
+            next.endPage = ranges[ranges.length - 1].end_page_num;
+          }
+          return next;
+        });
+      })
+      .catch((err) => {
+        setPrelabelModal((prev) =>
+          prev && prev.mode === "ci"
+            ? { ...prev, detecting: false, error: String(err) }
+            : prev,
+        );
+      });
+
+    api
+      .listDocumentSuggestions(documentId, "pending")
+      .then((existing) => {
+        setPrelabelModal((prev) => {
+          if (!prev || prev.mode !== "ci") return prev;
+          const seeded: PrelabelCandidate[] = existing
+            .filter(
+              (s) =>
+                s.start_page_num !== null &&
+                s.start_char !== null &&
+                s.end_page_num !== null &&
+                s.end_char !== null,
+            )
+            .map((s) => ({
+              suggestion_id: s.id,
+              label_definition_id: s.label_definition_id,
+              start_page_num: s.start_page_num as number,
+              start_char: s.start_char as number,
+              end_page_num: s.end_page_num as number,
+              end_char: s.end_char as number,
+              text: s.text,
+              confidence: s.confidence,
+              suggested_attributes: s.suggested_attributes,
+            }));
+          return { ...prev, candidates: seeded };
+        });
+      })
+      .catch(() => {
+        // Non-fatal — existing-suggestion seeding is a courtesy.
+      });
+  }, [doc, documentId]);
+
+  const runPrelabelCI = useCallback(() => {
+    if (!prelabelModal || prelabelModal.mode !== "ci") return;
+    if (prelabelModal.running) return;
+    const cfg = scopeLabelsForCI;
+    if (!cfg) {
+      setPrelabelModal((cur) =>
+        cur
+          ? {
+              ...cur,
+              error:
+                "Project needs two scope labels (one with an enum attribute) before this flow runs.",
+            }
+          : cur,
+      );
+      return;
+    }
+
+    const useRange =
+      !prelabelModal.tncRanges || prelabelModal.tncRanges.length === 0;
+    const provider: LlmProvider = prelabelModal.provider ?? "ollama";
+    const body = useRange
+      ? {
+          clause_label_id: cfg.clauseLabel.id,
+          instrument_label_id: cfg.instrumentLabel.id,
+          instrument_ranking_attribute_id: cfg.rankingAttrId,
+          start_page_num: prelabelModal.startPage,
+          end_page_num: prelabelModal.endPage,
+          provider,
+        }
+      : {
+          clause_label_id: cfg.clauseLabel.id,
+          instrument_label_id: cfg.instrumentLabel.id,
+          instrument_ranking_attribute_id: cfg.rankingAttrId,
+          provider,
+        };
+
+    setPrelabelModal((cur) =>
+      cur
+        ? {
+            ...cur,
+            running: true,
+            error: null,
+            progress: { done: 0, total: 0 },
+          }
+        : cur,
+    );
+
+    void api
+      .prelabelClausesInstrumentsStream(documentId, body, (event) => {
+        setPrelabelModal((cur) => {
+          if (!cur) return cur;
+          if (event.type === "started") {
+            return {
+              ...cur,
+              lastModel: event.model,
+              progress: { done: 0, total: event.total_pages },
+            };
+          }
+          if (event.type === "page_done") {
+            const seen = new Set(cur.candidates.map((c) => c.suggestion_id));
+            const merged = [
+              ...cur.candidates,
+              ...event.candidates.filter((c) => !seen.has(c.suggestion_id)),
+            ];
+            return {
+              ...cur,
+              candidates: merged,
+              progress: { done: event.pages_done, total: event.pages_total },
+              lastPagesScanned: event.pages_done,
+            };
+          }
+          if (event.type === "error") {
+            return { ...cur, running: false, error: event.message };
+          }
+          if (event.type === "done") {
+            return { ...cur, running: false };
+          }
+          return cur;
+        });
+      })
+      .catch((err) => {
+        setPrelabelModal((cur) =>
+          cur ? { ...cur, running: false, error: String(err) } : cur,
+        );
+      })
+      .finally(() => {
+        setPrelabelModal((cur) =>
+          cur && cur.running ? { ...cur, running: false } : cur,
+        );
+      });
+  }, [prelabelModal, scopeLabelsForCI, documentId]);
+
   // ---------- Pre-label (clause discovery) -------------------------------
   const openPrelabelModal = useCallback(() => {
     if (!doc) return;
@@ -947,6 +1159,7 @@ export default function DocumentViewer() {
       .filter((l) => !childIds.has(l.id))
       .map((l) => l.id);
     setPrelabelModal({
+      mode: "labels",
       startPage: start,
       endPage: end,
       selectedLabels: new Set(leafIds),
@@ -1180,6 +1393,18 @@ export default function DocumentViewer() {
           title="Use Ollama to propose annotations across a page range"
         >
           🪄 Pre-label
+        </button>
+        <button
+          className="btn ghost btn-xs"
+          onClick={openPrelabelCIModal}
+          disabled={scopeLabelsForCI === null}
+          title={
+            scopeLabelsForCI === null
+              ? "Needs two scope labels (one with an enum attribute) in this project"
+              : "Auto-find Terms & Conditions, then suggest one Clause per numbered clause and one Instrument per ranking section"
+          }
+        >
+          🪄 Pre-label clauses + instruments
         </button>
         <button
           className="btn ghost btn-xs"
@@ -1476,7 +1701,11 @@ export default function DocumentViewer() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="modal-header">
-              <h2>Pre-label clauses</h2>
+              <h2>
+                {prelabelModal.mode === "ci"
+                  ? "Pre-label clauses + instruments"
+                  : "Pre-label clauses"}
+              </h2>
               <span style={{ flex: 1 }} />
               <button
                 className="btn ghost btn-xs"
@@ -1485,6 +1714,106 @@ export default function DocumentViewer() {
                 close ✕
               </button>
             </div>
+
+            {prelabelModal.mode === "ci" && (
+              <div
+                style={{
+                  margin: "0 0 10px",
+                  padding: "8px 12px",
+                  borderRadius: 6,
+                  background: "#0f172a",
+                  color: "#cbd5e1",
+                  fontSize: 13,
+                }}
+              >
+                {prelabelModal.detecting ? (
+                  "Detecting Terms & Conditions section…"
+                ) : prelabelModal.tncRanges &&
+                  prelabelModal.tncRanges.length > 0 ? (
+                  <>
+                    Found{" "}
+                    <strong>{prelabelModal.tncRanges.length}</strong> T&C
+                    section{prelabelModal.tncRanges.length === 1 ? "" : "s"}:
+                    <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>
+                      {prelabelModal.tncRanges.map((r, idx) => (
+                        <li key={idx}>
+                          p.{r.start_page_num}–{r.end_page_num} · {r.title}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                ) : (
+                  <>
+                    No T&C section detected from the document outline —
+                    pick a page range manually below.
+                  </>
+                )}
+                <div
+                  style={{
+                    marginTop: 8,
+                    paddingTop: 8,
+                    borderTop: "1px solid #1e293b",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <span style={{ color: "#94a3b8" }}>Provider:</span>
+                  <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <input
+                      type="radio"
+                      name="ci-provider"
+                      value="ollama"
+                      checked={prelabelModal.provider === "ollama"}
+                      onChange={() =>
+                        setPrelabelModal((prev) =>
+                          prev ? { ...prev, provider: "ollama" } : prev,
+                        )
+                      }
+                    />
+                    Ollama
+                    {llmProviders?.ollama.model && (
+                      <span style={{ color: "#64748b" }}>
+                        ({llmProviders.ollama.model})
+                      </span>
+                    )}
+                  </label>
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 4,
+                      opacity: llmProviders?.claude.available ? 1 : 0.4,
+                    }}
+                  >
+                    <input
+                      type="radio"
+                      name="ci-provider"
+                      value="claude"
+                      checked={prelabelModal.provider === "claude"}
+                      disabled={!llmProviders?.claude.available}
+                      onChange={() =>
+                        setPrelabelModal((prev) =>
+                          prev ? { ...prev, provider: "claude" } : prev,
+                        )
+                      }
+                    />
+                    Claude
+                    {llmProviders?.claude.model && (
+                      <span style={{ color: "#64748b" }}>
+                        ({llmProviders.claude.model})
+                      </span>
+                    )}
+                    {!llmProviders?.claude.available && (
+                      <span style={{ color: "#94a3b8", fontStyle: "italic" }}>
+                        — set LABELLEX_ANTHROPIC_API_KEY
+                      </span>
+                    )}
+                  </label>
+                </div>
+              </div>
+            )}
 
             <div className="prelabel-form">
               <div className="prelabel-form-row">
@@ -1528,71 +1857,84 @@ export default function DocumentViewer() {
                 </span>
               </div>
 
-              <div className="prelabel-form-row" style={{ alignItems: "flex-start" }}>
-                <label style={{ paddingTop: 4 }}>Labels</label>
-                <div className="prelabel-label-grid">
-                  {labels.map((l) => {
-                    const checked = prelabelModal.selectedLabels.has(l.id);
-                    return (
-                      <label key={l.id} className="prelabel-label-item">
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(e) => {
-                            setPrelabelModal((prev) => {
-                              if (!prev) return prev;
-                              const next = new Set(prev.selectedLabels);
-                              if (e.target.checked) next.add(l.id);
-                              else next.delete(l.id);
-                              return { ...prev, selectedLabels: next };
-                            });
-                          }}
-                        />
-                        <span
-                          className="label-swatch"
-                          style={{ background: l.color }}
-                        />
-                        <span>{l.name}</span>
-                      </label>
-                    );
-                  })}
+              {prelabelModal.mode === "labels" && (
+                <div
+                  className="prelabel-form-row"
+                  style={{ alignItems: "flex-start" }}
+                >
+                  <label style={{ paddingTop: 4 }}>Labels</label>
+                  <div className="prelabel-label-grid">
+                    {labels.map((l) => {
+                      const checked = prelabelModal.selectedLabels.has(l.id);
+                      return (
+                        <label key={l.id} className="prelabel-label-item">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => {
+                              setPrelabelModal((prev) => {
+                                if (!prev) return prev;
+                                const next = new Set(prev.selectedLabels);
+                                if (e.target.checked) next.add(l.id);
+                                else next.delete(l.id);
+                                return { ...prev, selectedLabels: next };
+                              });
+                            }}
+                          />
+                          <span
+                            className="label-swatch"
+                            style={{ background: l.color }}
+                          />
+                          <span>{l.name}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
+              )}
 
               <div className="prelabel-form-row" style={{ justifyContent: "flex-end" }}>
-                <button
-                  className="btn ghost btn-xs"
-                  onClick={() => {
-                    setPrelabelModal((prev) =>
-                      prev
-                        ? {
-                            ...prev,
-                            selectedLabels: new Set(labels.map((l) => l.id)),
-                          }
-                        : prev,
-                    );
-                  }}
-                >
-                  select all
-                </button>
-                <button
-                  className="btn ghost btn-xs"
-                  onClick={() => {
-                    setPrelabelModal((prev) =>
-                      prev ? { ...prev, selectedLabels: new Set() } : prev,
-                    );
-                  }}
-                >
-                  clear
-                </button>
+                {prelabelModal.mode === "labels" && (
+                  <>
+                    <button
+                      className="btn ghost btn-xs"
+                      onClick={() => {
+                        setPrelabelModal((prev) =>
+                          prev
+                            ? {
+                                ...prev,
+                                selectedLabels: new Set(labels.map((l) => l.id)),
+                              }
+                            : prev,
+                        );
+                      }}
+                    >
+                      select all
+                    </button>
+                    <button
+                      className="btn ghost btn-xs"
+                      onClick={() => {
+                        setPrelabelModal((prev) =>
+                          prev ? { ...prev, selectedLabels: new Set() } : prev,
+                        );
+                      }}
+                    >
+                      clear
+                    </button>
+                  </>
+                )}
                 <span style={{ flex: 1 }} />
                 <button
                   className="btn"
                   disabled={
                     prelabelModal.running ||
-                    prelabelModal.selectedLabels.size === 0
+                    (prelabelModal.mode === "labels" &&
+                      prelabelModal.selectedLabels.size === 0) ||
+                    (prelabelModal.mode === "ci" && prelabelModal.detecting === true)
                   }
-                  onClick={runPrelabelScan}
+                  onClick={
+                    prelabelModal.mode === "ci" ? runPrelabelCI : runPrelabelScan
+                  }
                 >
                   {prelabelModal.running ? "scanning…" : "Run scan"}
                 </button>

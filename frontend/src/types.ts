@@ -270,10 +270,16 @@ export interface PrelabelCandidate {
   end_char: number;
   text: string;
   confidence: number;
+  suggested_attributes?: SuggestedAttribute[];
 }
 
 export type PrelabelEvent =
-  | { type: "started"; model: string; total_pages: number }
+  | {
+      type: "started";
+      model: string;
+      total_pages: number;
+      ranges?: { start_page_num: number; end_page_num: number; title: string }[];
+    }
   | {
       type: "page_done";
       page_num: number;
@@ -283,6 +289,28 @@ export type PrelabelEvent =
     }
   | { type: "done" }
   | { type: "error"; message: string };
+
+export type LlmProvider = "ollama" | "claude";
+
+export interface PrelabelCIRequest {
+  clause_label_id: number;
+  instrument_label_id: number;
+  instrument_ranking_attribute_id: number;
+  start_page_num?: number | null;
+  end_page_num?: number | null;
+  provider?: LlmProvider;
+}
+
+export interface TncRange {
+  start_page_num: number;
+  end_page_num: number;
+  title: string;
+}
+
+export interface LlmProvidersStatus {
+  ollama: { available: boolean; model: string };
+  claude: { available: boolean; model: string };
+}
 
 export interface SuggestionListItem {
   id: number;

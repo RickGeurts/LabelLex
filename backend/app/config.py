@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     )
     lora_forge_timeout_seconds: float = 30.0
 
+    # Claude API configuration. Set LABELLEX_ANTHROPIC_API_KEY to enable the
+    # Claude strategy on the Pre-label clauses + instruments endpoint;
+    # the route picks Claude when the request body sets provider="claude"
+    # and the key is configured.
+    anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-opus-4-7"
+
 
 settings = Settings()
 settings.storage_dir.mkdir(parents=True, exist_ok=True)

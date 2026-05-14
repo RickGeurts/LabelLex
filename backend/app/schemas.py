@@ -358,6 +358,37 @@ class PrelabelCandidate(_Base):
     end_char: int
     text: str
     confidence: float
+    suggested_attributes: list[SuggestedAttribute] = Field(default_factory=list)
+
+
+class PrelabelCIRequest(BaseModel):
+    """Pre-label clauses + instruments on the T&C section of a document.
+
+    `clause_label_id` and `instrument_label_id` reference the two scope
+    labels that drive the legend (typically the project's `Clause` and
+    `Instrument` is_scope labels). `instrument_ranking_attribute_id` is
+    the enum AttributeDefinition on the Instrument label whose values
+    constrain the model's ranking choice.
+
+    `start_page_num`/`end_page_num` are optional — when omitted the
+    server auto-detects the T&C section(s) via the document outline.
+
+    `provider` chooses the LLM backend. "ollama" is the offline default;
+    "claude" requires LABELLEX_ANTHROPIC_API_KEY to be set on the server.
+    """
+
+    clause_label_id: int
+    instrument_label_id: int
+    instrument_ranking_attribute_id: int
+    start_page_num: int | None = None
+    end_page_num: int | None = None
+    provider: Literal["ollama", "claude"] = "ollama"
+
+
+class TncRangeOut(_Base):
+    start_page_num: int
+    end_page_num: int
+    title: str
 
 
 class SuggestionListItem(_Base):
