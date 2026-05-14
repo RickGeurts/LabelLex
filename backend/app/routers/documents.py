@@ -130,6 +130,8 @@ def update_document(
                     detail="Category belongs to a different project",
                 )
             doc.category_id = new_cat_id
+    if "review_status" in data and data["review_status"] is not None:
+        doc.review_status = data["review_status"]
     db.commit()
     db.refresh(doc)
     attach_annotation_counts(db, [doc])

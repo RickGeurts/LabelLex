@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -96,15 +97,30 @@ def _build_payload(project: Project, documents: list[Document]) -> dict:
     }
 
 
+class PublishRequest(BaseModel):
+    """Optional body for publish-to-lora-forge.
+
+    `publish_unverified` is the override switch: by default the endpoint
+    refuses to publish if any document carries `review_status="unverified"`
+    so model-labelled artefacts can't ship to fine-tuning without a human
+    pass. Set to true to bypass.
+    """
+
+    publish_unverified: bool = False
+
+
 @router.post("/{project_id}/publish-to-lora-forge")
 def publish_to_lora_forge(
-    project_id: int, db: Session = Depends(get_db)
+    project_id: int,
+    body: PublishRequest | None = None,
+    db: Session = Depends(get_db),
 ) -> dict:
     """Bundle every document + annotation in this project and POST to LoRA Forge.
 
     Returns LoRA Forge's response inline so the caller (UI) can show the
     new dataset id without a follow-up request.
     """
+    publish_unverified = bool(body and body.publish_unverified)
     project = db.scalar(
         select(Project)
         .options(
@@ -128,6 +144,22 @@ def publish_to_lora_forge(
             .order_by(Document.id)
         ).all()
     )
+
+    unverified = [d for d in documents if d.review_status == "unverified"]
+    if unverified and not publish_unverified:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "unverified_documents",
+                "message": (
+                    f"{len(unverified)} document(s) are model-labelled but "
+                    "have not been marked as reviewed. Review them in the "
+                    "viewer, or set publish_unverified=true to override."
+                ),
+                "unverifiedDocumentIds": [d.id for d in unverified],
+                "unverifiedDocumentCount": len(unverified),
+            },
+        )
 
     payload = _build_payload(project, documents)
 

@@ -96,6 +96,7 @@ class DocumentOut(_Base):
     filename: str
     page_count: int
     status: str
+    review_status: str = "reviewed"
     uploaded_by: int
     uploaded_at: datetime
     last_modified_at: datetime
@@ -103,13 +104,15 @@ class DocumentOut(_Base):
 
 
 class DocumentUpdate(BaseModel):
-    """Mutate document-level metadata. v0: only `category_id` is editable
-    (set to null to unassign). All other doc state — filename, page_count,
-    status, etc. — is owned by the upload pipeline."""
+    """Mutate document-level metadata. v0: only `category_id` and
+    `review_status` are user-settable. All other doc state — filename,
+    page_count, status, etc. — is owned by the upload pipeline."""
 
     category_id: int | None = None
+    review_status: Literal["unverified", "reviewed"] | None = None
     # `model_fields_set` distinguishes "unset" from "explicitly null", so a
-    # null payload truly clears the category instead of being a no-op.
+    # null payload on `category_id` truly clears the category instead of
+    # being a no-op.
 
 
 class DocumentCategoryOut(_Base):
@@ -389,6 +392,30 @@ class TncRangeOut(_Base):
     start_page_num: int
     end_page_num: int
     title: str
+
+
+class AutoLabelRequest(BaseModel):
+    """Trigger bulk auto-labelling on a document.
+
+    `clause_label_id` / `instrument_label_id` / `instrument_ranking_attribute_id`
+    follow the same convention as `PrelabelCIRequest`.
+
+    `tier` picks the cost ladder:
+    - "regex" (default): segments T&C with regex, writes one Clause
+      annotation per top-level numbered clause. No LLM call, no
+      Instrument labels. Free, instant.
+    - "claude": regex segmentation, then one Sonnet/Opus call per clause
+      to also detect Instrument markers. Paid, ~30s/doc.
+
+    `model` overrides the default model on the Claude tier (no-op on the
+    regex tier). Defaults to Sonnet 4.6.
+    """
+
+    clause_label_id: int
+    instrument_label_id: int
+    instrument_ranking_attribute_id: int
+    tier: Literal["regex", "claude"] = "regex"
+    model: str | None = None
 
 
 class SuggestionListItem(_Base):

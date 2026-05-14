@@ -89,16 +89,146 @@ def _outline_to_ranges(
     return out
 
 
-def detect_tnc_ranges(pdf_path: str) -> list[TncRange]:
-    """Open the PDF, extract its outline, and return T&C ranges.
+_TNC_HEADING_RE = re.compile(
+    # Accepts three forms:
+    #   - `TERMS AND CONDITIONS OF THE [RANKING] NOTES` (most prospectuses)
+    #   - `TERMS AND CONDITIONS OF [SOMETHING]` (older / shorter docs)
+    #   - `APPENDIX N: TERMS AND CONDITIONS` (Argenta CDs)
+    # The `OF [...]` suffix is optional so bare "TERMS AND CONDITIONS"
+    # also matches. Case-sensitive ALL CAPS — relies on the heading being
+    # typographically distinct from body-text references.
+    r"^\s*(?:APPENDIX\s+\d+\s*:\s+)?TERMS\s+AND\s+CONDITIONS(?:\s+OF\s+(?:THE\s+)?[A-Z][A-Z \-]*)?",
+    re.MULTILINE,
+)
 
-    Empty list if no outline entry contains a T&C-like title. Callers
-    should fall back to asking the user for an explicit page range when
-    auto-detection misses (a few older prospectuses ship without a
-    machine-readable TOC).
+
+def _scan_section_heading_pages(pdf_doc: fitz.Document) -> list[int]:
+    """Find all PDF pages that begin with an all-caps section heading.
+
+    Used to bound the LAST T&C in a doc — we look for the next page
+    whose header looks like a section heading. This avoids relying on
+    the outline, which may have offset page numbers or be missing.
+
+    Scan window: first 600 chars of the page. Some PDFs (BOI EMTN
+    observed) emit a run of empty/whitespace lines at the top of each
+    page before the real content starts, so a "first few lines" window
+    is too narrow to catch the heading.
+    """
+    pages: list[int] = []
+    # An ALL-CAPS heading on its own line, anchored to a line start.
+    # Length floor of 6 chars filters page-number-only lines and
+    # decorative single words. Parens are excluded because real section
+    # headings in prospectuses don't carry them — but parenthetical
+    # fragments like `(Referencing SONIA)` wrapped onto a new line
+    # otherwise sneak through (observed on ING Covered Bond p114).
+    heading_re = re.compile(
+        r"(?:^|\n)\s*[A-Z][A-Z0-9 ,/\-&']{6,80}\s*(?:\n|$)",
+    )
+    # Reject ALL-CAPS lines preceded by a `N.` numbered marker — those
+    # are CLAUSE headings inside a T&C section, not SECTION headings.
+    # NIBC EMTN uses ALL-CAPS clause headings (`6.\nTAXATION`), which
+    # otherwise tricked the scanner into cutting the T&C off at p120.
+    numbered_prefix_re = re.compile(r"(?:^|\n)\s*\d{1,3}\.\s*$")
+    for page_index in range(len(pdf_doc)):
+        text = pdf_doc[page_index].get_text("text") or ""
+        head = text[:600]
+        m = heading_re.search(head)
+        if not m:
+            continue
+        # Look at the text immediately preceding the all-caps line —
+        # if it's a numbered marker, this is a clause heading, not a
+        # section heading.
+        before = head[: m.start()]
+        if numbered_prefix_re.search(before[-40:]):
+            continue
+        pages.append(page_index + 1)
+    return pages
+
+
+def _text_scan_tnc_ranges(pdf_doc: fitz.Document) -> list[TncRange]:
+    """Scan page headers for `TERMS AND CONDITIONS OF THE ...` literal text
+    and return a TncRange per hit.
+
+    Per-hit end boundary:
+    - If there's a later T&C hit, end at (next hit - 1). This is exact.
+    - Else (last T&C in the doc), look for the next all-caps section
+      heading on a later page and end one page before it. Falls back to
+      total_pages only when no such heading is found.
+
+    The text-scan-only approach (vs the outline) is more robust because
+    embedded outlines often use printed page numbers offset from PDF
+    indices — observed on NN Bank where outline's `page 105` actually
+    refers to PDF page 108.
+    """
+    total_pages = len(pdf_doc)
+    hits: list[tuple[int, str]] = []
+    seen_starts: set[int] = set()
+    for page_index in range(total_pages):
+        text = pdf_doc[page_index].get_text("text") or ""
+        head = text[:400]
+        m = _TNC_HEADING_RE.search(head)
+        if not m:
+            continue
+        # Skip Table-of-Contents pages — they list T&C headings as
+        # references alongside other section labels, not as the section
+        # itself (observed on Triodos p3 where the printed TOC's "TERMS
+        # AND CONDITIONS OF THE SENIOR PREFERRED NOTES" line otherwise
+        # got picked up as a bogus T&C start). The marker is "TABLE OF
+        # CONTENTS" within the first ~600 chars of the page.
+        if "TABLE OF CONTENTS" in text[:600].upper():
+            continue
+        start_page_num = page_index + 1
+        if start_page_num in seen_starts:
+            continue
+        seen_starts.add(start_page_num)
+        hits.append((start_page_num, m.group(0).strip()))
+
+    if not hits:
+        return []
+
+    # Pages whose headers look like section headings — used to bound the
+    # last T&C section.
+    section_heading_pages = _scan_section_heading_pages(pdf_doc)
+
+    out: list[TncRange] = []
+    for i, (start_page_num, title) in enumerate(hits):
+        if i + 1 < len(hits):
+            end_page_num = hits[i + 1][0] - 1
+        else:
+            # Last T&C: end at the next section heading after start, or
+            # at doc end if there's nothing recognisable downstream.
+            candidates = [
+                p for p in section_heading_pages if p > start_page_num + 1
+            ]
+            end_page_num = (candidates[0] - 1) if candidates else total_pages
+        if end_page_num < start_page_num:
+            continue
+        out.append(
+            TncRange(
+                start_page_num=start_page_num,
+                end_page_num=end_page_num,
+                title=title,
+            )
+        )
+    return out
+
+
+def detect_tnc_ranges(pdf_path: str) -> list[TncRange]:
+    """Open the PDF and return the T&C ranges within it.
+
+    Strategy: prefer text-scanned headings over the embedded outline.
+    The outline is often off (printed page numbers vs PDF indices, or
+    just incomplete), while the rendered `TERMS AND CONDITIONS OF THE …`
+    heading is always at the exact PDF page where the section starts.
+    Fall back to outline-based detection only when no headings are
+    visible in page text — covers older docs where pdfminer ate the
+    heading or it lives in an image.
     """
     pdf_doc = fitz.open(pdf_path)
     try:
+        ranges = _text_scan_tnc_ranges(pdf_doc)
+        if ranges:
+            return ranges
         outline = get_outline(pdf_doc)
         return _outline_to_ranges(outline, total_pages=len(pdf_doc))
     finally:

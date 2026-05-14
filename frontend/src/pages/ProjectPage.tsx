@@ -206,23 +206,49 @@ export default function ProjectPage() {
     () => (docs ?? []).reduce((sum, d) => sum + (d.annotation_count ?? 0), 0),
     [docs],
   );
+  const unverifiedCount = useMemo(
+    () => (docs ?? []).filter((d) => d.review_status === "unverified").length,
+    [docs],
+  );
 
-  const onPublishToLoraForge = async () => {
+  const doPublish = async (publishUnverified: boolean) => {
     if (!Number.isFinite(projectId)) return;
     setPublishing(true);
     setPublishMessage(null);
     try {
-      const result = await api.publishToLoraForge(projectId);
+      const result = await api.publishToLoraForge(projectId, {
+        publishUnverified,
+      });
       setPublishMessage({
         tone: "ok",
         text: `Published ${result.summary.documentsWithLabels}/${result.summary.totalDocuments} document(s) and ${result.summary.annotations} annotation(s) → LoRA Forge dataset ${result.dataset.id} (${result.dataset.rowCount} row${result.dataset.rowCount === 1 ? "" : "s"}).`,
       });
     } catch (e) {
-      setPublishMessage({ tone: "err", text: String(e) });
+      const msg = String(e);
+      // Surface the server's 409 unverified-docs error with an override
+      // option in the toast UI.
+      if (msg.includes("409") && msg.includes("unverified")) {
+        const proceed = window.confirm(
+          `${unverifiedCount} document(s) are model-labelled but not yet ` +
+            `marked as reviewed. Publish anyway?`,
+        );
+        if (proceed) {
+          await doPublish(true);
+          return;
+        }
+        setPublishMessage({
+          tone: "err",
+          text: `Publish blocked: ${unverifiedCount} unverified document(s). Mark them as reviewed in the viewer or override.`,
+        });
+      } else {
+        setPublishMessage({ tone: "err", text: msg });
+      }
     } finally {
       setPublishing(false);
     }
   };
+
+  const onPublishToLoraForge = () => doPublish(false);
 
   return (
     <>
@@ -301,6 +327,23 @@ export default function ProjectPage() {
             {docs?.length ?? 0} document
             {(docs?.length ?? 0) === 1 ? "" : "s"}
           </span>
+          {unverifiedCount > 0 && (
+            <span
+              style={{
+                marginLeft: 8,
+                padding: "2px 8px",
+                borderRadius: 4,
+                background: "#fef3c7",
+                color: "#92400e",
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: 0.4,
+              }}
+              title="Auto-labelled documents that have not been marked as reviewed will block the publish unless overridden"
+            >
+              {unverifiedCount} UNVERIFIED
+            </span>
+          )}
           <button
             className="btn btn-xs"
             onClick={onPublishToLoraForge}
@@ -422,6 +465,23 @@ export default function ProjectPage() {
                       ) : (
                         <span className="status-pill status-pill-unlabelled">
                           unlabelled
+                        </span>
+                      )}
+                      {d.review_status === "unverified" && (
+                        <span
+                          style={{
+                            marginLeft: 6,
+                            padding: "2px 6px",
+                            borderRadius: 4,
+                            background: "#fef3c7",
+                            color: "#92400e",
+                            fontSize: 10,
+                            fontWeight: 600,
+                            letterSpacing: 0.4,
+                          }}
+                          title="Auto-labelled; not yet marked as reviewed"
+                        >
+                          UNVERIFIED
                         </span>
                       )}
                     </td>

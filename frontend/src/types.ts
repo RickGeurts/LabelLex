@@ -69,6 +69,7 @@ export interface Document {
   filename: string;
   page_count: number;
   status: string;
+  review_status: "unverified" | "reviewed";
   uploaded_by: number;
   uploaded_at: string;
   last_modified_at: string;
@@ -77,6 +78,7 @@ export interface Document {
 
 export interface DocumentUpdate {
   category_id?: number | null;
+  review_status?: "unverified" | "reviewed";
 }
 
 export interface DocumentCategory {
@@ -311,6 +313,37 @@ export interface LlmProvidersStatus {
   ollama: { available: boolean; model: string };
   claude: { available: boolean; model: string };
 }
+
+export type AutoLabelTier = "regex" | "claude";
+
+export interface AutoLabelRequest {
+  clause_label_id: number;
+  instrument_label_id: number;
+  instrument_ranking_attribute_id: number;
+  tier?: AutoLabelTier;
+  model?: string | null;
+}
+
+export type AutoLabelEvent =
+  | {
+      type: "started";
+      model: string;
+      tier?: AutoLabelTier;
+      clauses_total: number;
+      ranges: TncRange[];
+    }
+  | {
+      type: "clause_done";
+      clauses_done: number;
+      clauses_total: number;
+      number: string;
+      heading: string;
+      clause_annotation_id: number;
+      instrument_annotation_id: number | null;
+      ranking: string | null;
+    }
+  | { type: "done" }
+  | { type: "error"; message: string };
 
 export interface SuggestionListItem {
   id: number;

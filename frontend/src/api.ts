@@ -7,6 +7,8 @@ import type {
   AttributeCreate,
   AttributeDefinition,
   AttributeUpdate,
+  AutoLabelEvent,
+  AutoLabelRequest,
   DetectStructureResponse,
   Document,
   DocumentCategory,
@@ -233,6 +235,15 @@ export const api = {
     payload,
     onEvent,
   ),
+  autoLabelDocumentStream: async (
+    documentId: number,
+    payload: AutoLabelRequest,
+    onEvent: (e: AutoLabelEvent) => void,
+  ): Promise<void> => streamNdjson(
+    `/api/documents/${documentId}/auto-label`,
+    payload,
+    onEvent,
+  ),
   listDocumentSuggestions: (documentId: number, status: string = "pending") =>
     jsonRequest<SuggestionListItem[]>(
       `/api/documents/${documentId}/suggestions?status=${encodeURIComponent(status)}`,
@@ -258,7 +269,7 @@ export const api = {
     }
     return res.json();
   },
-  publishToLoraForge: (projectId: number) =>
+  publishToLoraForge: (projectId: number, options?: { publishUnverified?: boolean }) =>
     jsonRequest<{
       ok: boolean;
       loraForgeUrl: string;
@@ -268,5 +279,10 @@ export const api = {
         documentsWithLabels: number;
         annotations: number;
       };
-    }>(`/api/projects/${projectId}/publish-to-lora-forge`, { method: "POST" }),
+    }>(`/api/projects/${projectId}/publish-to-lora-forge`, {
+      method: "POST",
+      body: JSON.stringify({
+        publish_unverified: options?.publishUnverified ?? false,
+      }),
+    }),
 };

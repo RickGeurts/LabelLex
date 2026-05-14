@@ -22,6 +22,7 @@ import type {
   Document as DocModel,
   Label,
   Page as PageModel,
+  AutoLabelTier,
   LlmProvider,
   LlmProvidersStatus,
   PrelabelCandidate,
@@ -192,6 +193,17 @@ export default function DocumentViewer() {
     provider?: LlmProvider;
   }
   const [prelabelModal, setPrelabelModal] = useState<PrelabelState | null>(null);
+
+  interface AutoLabelState {
+    running: boolean;
+    clausesDone: number;
+    clausesTotal: number;
+    lastHeading: string | null;
+    model: string | null;
+    error: string | null;
+  }
+  const [autoLabel, setAutoLabel] = useState<AutoLabelState | null>(null);
+
   const [llmProviders, setLlmProviders] = useState<LlmProvidersStatus | null>(null);
   useEffect(() => {
     api
@@ -979,6 +991,108 @@ export default function DocumentViewer() {
     return { clauseLabel, instrumentLabel, rankingAttrId };
   }, [labels]);
 
+  // ---------- Auto-label (bulk Sonnet, writes annotations directly) -----
+
+  const runAutoLabel = useCallback((tier: AutoLabelTier) => {
+    if (!doc) return;
+    if (autoLabel?.running) return;
+    const cfg = scopeLabelsForCI;
+    if (!cfg) return;
+    if (tier === "claude" && !llmProviders?.claude.available) return;
+    const confirmMsg = tier === "regex"
+      ? `Regex auto-label will segment the T&C with a simple regex and ` +
+        `write one Clause annotation per top-level numbered clause. ` +
+        `No instruments at this tier — escalate to Sonnet for those. ` +
+        `The document will be marked "unverified" until you review it. ` +
+        `Continue?`
+      : `Sonnet auto-label will run Sonnet across every numbered clause in ` +
+        `the T&C section and write Clause + Instrument annotations directly. ` +
+        `The document will be marked "unverified" until you review it. ` +
+        `Continue?`;
+    const confirmed = window.confirm(confirmMsg);
+    if (!confirmed) return;
+    setAutoLabel({
+      running: true,
+      clausesDone: 0,
+      clausesTotal: 0,
+      lastHeading: null,
+      model: null,
+      error: null,
+    });
+    void api
+      .autoLabelDocumentStream(
+        documentId,
+        {
+          clause_label_id: cfg.clauseLabel.id,
+          instrument_label_id: cfg.instrumentLabel.id,
+          instrument_ranking_attribute_id: cfg.rankingAttrId,
+          tier,
+        },
+        (event) => {
+          setAutoLabel((cur) => {
+            if (!cur) return cur;
+            if (event.type === "started") {
+              return {
+                ...cur,
+                model: event.model,
+                clausesTotal: event.clauses_total,
+              };
+            }
+            if (event.type === "clause_done") {
+              return {
+                ...cur,
+                clausesDone: event.clauses_done,
+                clausesTotal: event.clauses_total,
+                lastHeading: `${event.number}. ${event.heading}`,
+              };
+            }
+            if (event.type === "error") {
+              return { ...cur, running: false, error: event.message };
+            }
+            if (event.type === "done") {
+              return { ...cur, running: false };
+            }
+            return cur;
+          });
+        },
+      )
+      .then(() => {
+        // Refetch annotations + document so the new annotations show in the
+        // viewer and the review_status pill updates.
+        Promise.all([
+          api.listAnnotations(documentId),
+          api.getDocument(documentId),
+        ]).then(([anns, freshDoc]) => {
+          setAnnotations(anns);
+          setDoc(freshDoc);
+        });
+      })
+      .catch((err) => {
+        setAutoLabel((cur) =>
+          cur ? { ...cur, running: false, error: String(err) } : cur,
+        );
+      })
+      .finally(() => {
+        setAutoLabel((cur) => (cur && cur.running ? { ...cur, running: false } : cur));
+      });
+  }, [
+    doc,
+    documentId,
+    autoLabel?.running,
+    scopeLabelsForCI,
+    llmProviders?.claude.available,
+  ]);
+
+  const markReviewed = useCallback(() => {
+    if (!doc) return;
+    api
+      .updateDocument(doc.id, { review_status: "reviewed" })
+      .then((updated) => setDoc(updated))
+      .catch((err) => {
+        window.alert(`Could not mark reviewed: ${err}`);
+      });
+  }, [doc]);
+
   const openPrelabelCIModal = useCallback(() => {
     if (!doc) return;
     const defaultProvider: LlmProvider = llmProviders?.claude.available
@@ -1408,6 +1522,66 @@ export default function DocumentViewer() {
         </button>
         <button
           className="btn ghost btn-xs"
+          onClick={() => runAutoLabel("regex")}
+          disabled={scopeLabelsForCI === null || autoLabel?.running === true}
+          title={
+            scopeLabelsForCI === null
+              ? "Needs two scope labels (one with an enum attribute) in this project"
+              : "Tier 1: segment T&C with regex, write one Clause annotation per numbered clause. No instruments, no LLM call. Free, instant."
+          }
+        >
+          {autoLabel?.running && autoLabel.model === "regex-only"
+            ? `Auto-labelling… ${autoLabel.clausesDone}/${autoLabel.clausesTotal}`
+            : "🪄 Auto-label (regex)"}
+        </button>
+        <button
+          className="btn ghost btn-xs"
+          onClick={() => runAutoLabel("claude")}
+          disabled={
+            scopeLabelsForCI === null ||
+            !llmProviders?.claude.available ||
+            autoLabel?.running === true
+          }
+          title={
+            !llmProviders?.claude.available
+              ? "Needs LABELLEX_ANTHROPIC_API_KEY on the server"
+              : scopeLabelsForCI === null
+              ? "Needs two scope labels (one with an enum attribute) in this project"
+              : "Tier 3 escalation: same regex segmentation, plus one Sonnet call per clause to detect Instrument markers."
+          }
+        >
+          {autoLabel?.running && autoLabel.model !== "regex-only"
+            ? `Auto-labelling… ${autoLabel.clausesDone}/${autoLabel.clausesTotal}`
+            : "🪄 Auto-label (Sonnet)"}
+        </button>
+        {doc?.review_status === "unverified" && (
+          <button
+            className="btn btn-xs"
+            onClick={markReviewed}
+            title="Confirm this document's auto-labels are accurate enough to publish"
+            style={{ background: "#16a34a", borderColor: "#16a34a", color: "white" }}
+          >
+            Mark as reviewed
+          </button>
+        )}
+        {doc?.review_status === "unverified" && (
+          <span
+            className="pill"
+            style={{
+              background: "#fef3c7",
+              color: "#92400e",
+              borderRadius: 4,
+              padding: "2px 8px",
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: 0.4,
+            }}
+          >
+            UNVERIFIED
+          </span>
+        )}
+        <button
+          className="btn ghost btn-xs"
           onClick={() => setShowPanel((v) => !v)}
           title="Toggle annotation panel"
         >
@@ -1455,6 +1629,46 @@ export default function DocumentViewer() {
           title="Jump to page"
         />
       </div>
+
+      {autoLabel?.error && (
+        <div className="error-banner" style={{ margin: "8px 0" }}>
+          Auto-label failed: {autoLabel.error}{" "}
+          <button
+            className="btn ghost btn-xs"
+            onClick={() => setAutoLabel(null)}
+            style={{ marginLeft: 8 }}
+          >
+            dismiss
+          </button>
+        </div>
+      )}
+
+      {autoLabel?.running && autoLabel.clausesTotal > 0 && (
+        <div
+          style={{
+            margin: "8px 0",
+            padding: "8px 12px",
+            borderRadius: 6,
+            background: "#0f172a",
+            color: "#cbd5e1",
+            fontSize: 13,
+          }}
+        >
+          Auto-labelling with{" "}
+          <code>{autoLabel.model ?? "claude-sonnet-4-6"}</code> ·{" "}
+          {autoLabel.clausesDone} of {autoLabel.clausesTotal} clauses
+          {autoLabel.lastHeading && (
+            <>
+              {" "}· last: <em>{autoLabel.lastHeading}</em>
+            </>
+          )}
+          <progress
+            max={autoLabel.clausesTotal || 1}
+            value={autoLabel.clausesDone}
+            style={{ width: "100%", marginTop: 4 }}
+          />
+        </div>
+      )}
 
       {searchOpen && (
         <div className="viewer-search">

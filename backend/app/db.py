@@ -78,6 +78,16 @@ def run_lightweight_migrations() -> None:
             conn.execute(
                 text("ALTER TABLE documents ADD COLUMN category_id INTEGER")
             )
+        if "review_status" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE documents ADD COLUMN review_status VARCHAR(16) "
+                    "NOT NULL DEFAULT 'reviewed'"
+                )
+            )
+            # Backfill: existing docs are 'reviewed' by default (the human
+            # labelled them by hand). Auto-label runs flip new annotations'
+            # parent doc to 'unverified' explicitly.
 
         label_cols = {
             row[1]

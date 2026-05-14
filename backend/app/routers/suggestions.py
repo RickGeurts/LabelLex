@@ -39,6 +39,7 @@ from ..models import (
 )
 from ..schemas import (
     AnnotationOut,
+    AutoLabelRequest,
     PrelabelCIRequest,
     PrelabelRequest,
     SuggestAttributesIn,
@@ -53,6 +54,7 @@ from ..services.clause_instrument_discovery import (
     detect_tnc_ranges,
     discover_on_page as discover_ci_on_page,
 )
+from ..services.auto_label import run_auto_label
 from ..services.clause_instrument_discovery_claude import (
     collect_few_shot_examples,
     discover_on_page_claude,
@@ -722,6 +724,78 @@ def prelabel_clauses_and_instruments(
             yield json.dumps(
                 {"type": "error", "message": f"Unexpected error: {exc}"}
             ) + "\n"
+
+    return StreamingResponse(
+        event_stream(), media_type="application/x-ndjson"
+    )
+
+
+# --- Bulk auto-label (production path) ------------------------------------
+
+
+@router.post("/documents/{document_id}/auto-label")
+def auto_label_document(
+    document_id: int,
+    payload: AutoLabelRequest,
+    db: Session = Depends(get_db),
+) -> StreamingResponse:
+    """Run the bulk auto-label pipeline and write Annotations directly.
+
+    Streaming NDJSON shape:
+      - {"type":"started","model","clauses_total","ranges":[...]}
+      - {"type":"clause_done","clauses_done","clauses_total","number",
+         "heading","clause_annotation_id","instrument_annotation_id",
+         "ranking"}
+      - {"type":"done"}
+      - {"type":"error","message"}
+
+    On success, flips `Document.review_status` to "unverified" so the
+    LoRA Forge publish endpoint can gate on it.
+    """
+    doc = db.get(Document, document_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    clause_label = db.get(LabelDefinition, payload.clause_label_id)
+    instrument_label = db.get(LabelDefinition, payload.instrument_label_id)
+    if clause_label is None or instrument_label is None:
+        raise HTTPException(status_code=404, detail="Scope label not found")
+    if (
+        clause_label.project_id != doc.project_id
+        or instrument_label.project_id != doc.project_id
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Scope labels must belong to the document's project",
+        )
+
+    ranking_attr = db.get(
+        AttributeDefinition, payload.instrument_ranking_attribute_id
+    )
+    if ranking_attr is None or ranking_attr.label_id != instrument_label.id:
+        raise HTTPException(
+            status_code=400,
+            detail="Ranking attribute must belong to the instrument scope label",
+        )
+    if ranking_attr.value_type != "enum" or not ranking_attr.enum_values:
+        raise HTTPException(
+            status_code=400,
+            detail="Ranking attribute must be an enum with enum_values",
+        )
+    ranking_values = list(ranking_attr.enum_values)
+
+    def event_stream() -> Iterator[str]:
+        for event in run_auto_label(
+            db,
+            document=doc,
+            clause_label=clause_label,
+            instrument_label=instrument_label,
+            ranking_attribute_id=ranking_attr.id,
+            ranking_values=ranking_values,
+            tier=payload.tier,
+            model=payload.model,
+        ):
+            yield json.dumps({"type": event.type, **event.payload}) + "\n"
 
     return StreamingResponse(
         event_stream(), media_type="application/x-ndjson"
