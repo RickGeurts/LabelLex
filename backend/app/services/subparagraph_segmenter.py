@@ -54,6 +54,56 @@ _SUBPARA_RE = re.compile(
 )
 
 
+# Heading-text signatures that flag a regex match as a false positive
+# rather than a real sub-paragraph start. Two failure modes from the
+# anomaly audit:
+#   - Class 1 (back-references): "(a) above in respect of..."
+#                                "(x) and (y) of this clause (b)..."
+#                                "(b) of these Conditions..."
+#   - Class 2 (concatenated markers): "(i)(b). (4) SONIA Fallbacks..."
+#                                      — captures (i) but heading is "(b)..."
+# Real sub-paragraph headings start with content words and don't open
+# with a paren, a positional adverb, or a conjunction-into-marker.
+_HEAD_REF_FIRST_WORDS = frozenset({"above", "below"})
+_HEAD_REF_LIST_PREFIXES = ("and (", "or (")
+_HEAD_REF_PHRASES = (
+    "of this clause",
+    "of these conditions",
+    "of this condition",
+    "of the conditions",
+    "of these terms",
+)
+
+
+_LEADING_ALPHA_RE = re.compile(r"[a-zA-Z]+")
+
+
+def _is_reference_or_concatenated(head: str) -> bool:
+    h = head.lstrip()
+    if not h:
+        return False
+    # Class 2: heading opens with another marker — the regex anchored on
+    # an inner glued token rather than a real sub-paragraph start.
+    if h.startswith("("):
+        return True
+    h_lower = h.lower()
+    # Class 1a: positional back-reference. Match the leading alphabetic
+    # run only so debris like "above,109" (footnote-glued page numbers)
+    # still resolves to "above".
+    m = _LEADING_ALPHA_RE.match(h_lower)
+    first_alpha = m.group(0) if m else ""
+    if first_alpha in _HEAD_REF_FIRST_WORDS:
+        return True
+    # Class 1b: list-of-references "(x) and (y)...", "(p) or (q)...".
+    if any(h_lower.startswith(p) for p in _HEAD_REF_LIST_PREFIXES):
+        return True
+    # Class 1c: phrases that only appear inside cross-references.
+    head_prefix = h_lower[:50]
+    if any(phrase in head_prefix for phrase in _HEAD_REF_PHRASES):
+        return True
+    return False
+
+
 # Roman numeral conversion for sequence-check purposes. Cap at 30 — real
 # legal docs rarely go past (xv) at one nesting level.
 _ROMAN_TO_INT = {
@@ -302,6 +352,10 @@ def segment_subparagraphs(
             and first_segment is not None
             and first_segment != clause_number
         ):
+            continue
+        # Drop back-references ("(a) above…", "(x) and (y) of this clause…")
+        # and in-line concatenated markers ("(i)(b). (4) SONIA…").
+        if _is_reference_or_concatenated(m.group("head") or ""):
             continue
         # Find the x0 of this marker's leading word for indentation-
         # based level assignment.
